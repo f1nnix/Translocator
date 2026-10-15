@@ -1,0 +1,19 @@
+[package]
+name = "tl-local"
+description = "Translocator provider for the local file system"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+tl-core.workspace = true
+filetime.workspace = true
+libc.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+tar.workspace = true
+trash.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

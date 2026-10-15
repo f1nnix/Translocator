@@ -1,0 +1,21 @@
+[package]
+name = "tl-core"
+description = "Translocator core: virtual file system API, plugin registry, bookmarks and transfer engine"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+dirs.workspace = true
+libc.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tar.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
