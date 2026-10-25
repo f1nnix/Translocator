@@ -7,6 +7,7 @@
 //! `mv` to copy and move on the server, `tar` to stream to and from other
 //! locations — optionally wrapped in `sudo`.
 
+mod archive;
 mod config;
 mod listing;
 mod master;

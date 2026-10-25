@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use tl_core::archive::{ArchiveBackend, ArchiveFormat};
 use tl_core::shell::Script;
 use tl_core::util::recursive_dir_mode;
 use tl_core::{
@@ -10,6 +11,7 @@ use tl_core::{
     WalkEntry,
 };
 
+use crate::archive::RemoteArchive;
 use crate::config::SshTarget;
 use crate::listing::{self, Dialect};
 use crate::master::Master;
@@ -187,7 +189,7 @@ impl SshVfs {
         let mut start = 0;
         while start < items.len() {
             let mut body = Script::new();
-            body.raw(scripts::MERGE_FUNCTIONS);
+            body.raw(scripts::RM_FUNCTION).raw(scripts::MERGE_FUNCTIONS);
             body.raw(if verbose { "TL_CP=-av\n" } else { "TL_CP=-a\n" });
             if let Some(owner) = &owner {
                 body.raw("TL_OWNER=").arg(owner).raw("\n");
@@ -334,6 +336,43 @@ impl Vfs for SshVfs {
         self.run_checked(&s, ctx, &to.display()).map(drop)
     }
 
+    fn rename_all(&self, steps: &[(VPath, VPath)], ctx: &OpCtx, done: &mut usize) -> VfsResult<()> {
+        // One script per chunk, each step reporting itself, so a failed
+        // batch knows how far it got. Not interrupted midway: a cancel
+        // takes effect between chunks.
+        let mut start = 0;
+        while start < steps.len() {
+            ctx.cancel.check()?;
+            let mut s = Script::new();
+            s.raw(concat!(
+                "tl_mv() { if [ -e \"$2\" ] || [ -L \"$2\" ]; then echo TLERR:EEXIST >&2; return 2; fi; ",
+                "mv -- \"$1\" \"$2\" || return 1; printf '\\036'; }\n",
+            ));
+            let mut end = start;
+            while end < steps.len() && (end == start || s.len() < MAX_SCRIPT) {
+                let (from, to) = &steps[end];
+                s.raw("tl_mv").sp_arg(from.as_bytes()).sp_arg(to.as_bytes()).raw(" || exit $?\n");
+                end += 1;
+            }
+            let out = self.remote.run(
+                s.as_bytes(),
+                RunOpts {
+                    elevated: ctx.elevated,
+                    ..Default::default()
+                },
+                &tl_core::CancelToken::new(),
+            )?;
+            let completed = out.stdout.iter().filter(|b| **b == 0x1e).count();
+            *done += completed;
+            if !out.success() {
+                let what = steps.get(start + completed).map(|(_, to)| to.display()).unwrap_or_default();
+                return Err(out.error(&what));
+            }
+            start = end;
+        }
+        Ok(())
+    }
+
     fn delete(&self, paths: &[VPath], ctx: &OpCtx, progress: &Progress) -> VfsResult<()> {
         if paths.iter().any(VPath::is_root) {
             return Err(VfsError::other("Refusing to delete /"));
@@ -342,7 +381,7 @@ impl Vfs for SshVfs {
         for chunk in chunks(paths) {
             progress.set_current(chunk[0].display());
             let mut body = Script::new();
-            body.raw("rm -rf --");
+            body.raw(scripts::RM_FUNCTION).raw("tl_rm");
             for p in chunk {
                 body.sp_arg(p.as_bytes());
             }
@@ -517,7 +556,9 @@ impl Vfs for SshVfs {
         s.raw(if self.info.tar_p {
             "exec tar -x -p -o -f -\n"
         } else {
-            "exec tar -x -o -f -\n"
+            // BusyBox tar ignores -p and applies the umask unless it runs as
+            // root; with no umask the archive's modes come through as with -p.
+            "umask 0\nexec tar -x -o -f -\n"
         });
         let sink = self
             .remote
@@ -539,17 +580,26 @@ impl Vfs for SshVfs {
         ctx: &OpCtx,
         found: &mut dyn FnMut(VPath, tl_core::EntryKind) -> bool,
     ) -> VfsResult<()> {
-        // Runs `find` on the server; only matches travel back.
+        // Runs `find` on the server; only matches travel back. Both
+        // `-exec {} +` stay at the top level of the expression: BusyBox find
+        // never runs batches nested inside `\( \)`.
         let mut body = Script::new();
         scripts::require_dir(&mut body, root.as_bytes());
-        body.raw("find . \\(");
-        for (i, mask) in masks.iter().enumerate() {
-            if i > 0 {
-                body.raw(" -o");
+        let any_mask = |body: &mut Script| {
+            body.raw(" \\(");
+            for (i, mask) in masks.iter().enumerate() {
+                if i > 0 {
+                    body.raw(" -o");
+                }
+                body.raw(" -iname").sp_arg(mask.as_bytes());
             }
-            body.raw(" -iname").sp_arg(mask.as_bytes());
-        }
-        body.raw(" \\) \\( -type d -exec printf 'd %s\\n' {} + -o -exec printf 'f %s\\n' {} + \\) 2>/dev/null | head -n 5000\nexit 0\n");
+            body.raw(" \\)");
+        };
+        body.raw("find .");
+        any_mask(&mut body);
+        body.raw(" -type d -exec printf 'd %s\\n' {} + -o");
+        any_mask(&mut body);
+        body.raw(" -exec printf 'f %s\\n' {} + 2>/dev/null | head -n 5000\nexit 0\n");
         let mut line = Vec::new();
         let mut stopped = false;
         let out = self.run_job(body.as_bytes(), ctx, |data| {
@@ -568,6 +618,10 @@ impl Vfs for SshVfs {
             }
         })?;
         if out.success() { Ok(()) } else { Err(out.error(&root.display())) }
+    }
+
+    fn open_archive(&self, path: &VPath, format: ArchiveFormat) -> VfsResult<Arc<dyn ArchiveBackend>> {
+        Ok(Arc::new(RemoteArchive::new(self.remote.clone(), path.clone(), format, self.info.tar_p)))
     }
 
     fn exec(&self, cwd: &VPath, command: &str, ctx: &OpCtx) -> VfsResult<ExecOutput> {

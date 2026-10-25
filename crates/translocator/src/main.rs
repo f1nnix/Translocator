@@ -10,6 +10,10 @@ mod editor;
 mod jobs;
 mod pane;
 mod properties;
+mod rename;
+mod sync;
+#[cfg(test)]
+mod ui_tests;
 mod util;
 mod workspace;
 

@@ -1,5 +1,7 @@
 use std::io::{Read, Write};
+use std::sync::Arc;
 
+use crate::archive::{ArchiveBackend, ArchiveFormat};
 use crate::cancel::CancelToken;
 use crate::entry::{Entry, EntryKind};
 use crate::error::{VfsError, VfsResult};
@@ -181,6 +183,18 @@ pub trait Vfs: Send + Sync {
     /// Renames within the same file system; fails if `to` exists.
     fn rename(&self, from: &VPath, to: &VPath, ctx: &OpCtx) -> VfsResult<()>;
 
+    /// Renames several items one after another, like [`Vfs::rename`],
+    /// counting completed steps in `done` so a failed batch can be undone.
+    /// Providers that pay per call (servers) do it in one command.
+    fn rename_all(&self, steps: &[(VPath, VPath)], ctx: &OpCtx, done: &mut usize) -> VfsResult<()> {
+        for (from, to) in steps {
+            ctx.cancel.check()?;
+            self.rename(from, to, ctx)?;
+            *done += 1;
+        }
+        Ok(())
+    }
+
     /// Permanently deletes paths (recursively).
     fn delete(&self, paths: &[VPath], ctx: &OpCtx, progress: &Progress) -> VfsResult<()>;
 
@@ -271,6 +285,18 @@ pub trait Vfs: Send + Sync {
     /// argv of an interactive terminal session opened at `cwd`, for "Open
     /// in Terminal". `None` if the provider has no such notion.
     fn terminal_command(&self, _cwd: &VPath, _elevated: bool) -> Option<Vec<String>> {
+        None
+    }
+
+    /// The archive work for an archive file in this file system, used by
+    /// [`crate::archive::open`] to show the archive as a folder.
+    fn open_archive(&self, _path: &VPath, format: ArchiveFormat) -> VfsResult<Arc<dyn ArchiveBackend>> {
+        Err(VfsError::Unsupported(format!("{} archives here", format.name())))
+    }
+
+    /// For a file system mounted from a file of another one (an archive):
+    /// that file system and the file's path.
+    fn host(&self) -> Option<(Arc<dyn Vfs>, VPath)> {
         None
     }
 

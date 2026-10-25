@@ -76,6 +76,17 @@ fn strip_counter(stem: &[u8]) -> (&[u8], u64) {
     (stem, 2)
 }
 
+/// The key names are matched by on a file system that may ignore case.
+pub fn name_key(name: &[u8], case_insensitive: bool) -> Vec<u8> {
+    if !case_insensitive {
+        return name.to_vec();
+    }
+    match std::str::from_utf8(name) {
+        Ok(s) => s.to_lowercase().into_bytes(),
+        Err(_) => name.to_ascii_lowercase(),
+    }
+}
+
 /// Turns user search input into wildcard masks: text without `*` or `?`
 /// matches anywhere in a name (`nginx` → `*nginx*`).
 pub fn search_masks(input: &str) -> Vec<String> {

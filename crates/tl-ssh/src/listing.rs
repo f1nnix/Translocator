@@ -58,7 +58,8 @@ pub fn list_script(dialect: Dialect, dir: &VPath) -> Script {
                 .raw("' 2>/dev/null\nexit 0\n");
         }
         _ => {
-            s.raw("printf '%s\\0' * .[!.]* ..?* | xargs -0 ")
+            // `./`: GNU stat takes a file named `-` for standard input.
+            s.raw("printf './%s\\0' * .[!.]* ..?* | xargs -0 ")
                 .raw(dialect.stat_cmd())
                 .raw(" -- 2>/dev/null\n")
                 .raw(SYMLINK_PASS)

@@ -47,3 +47,9 @@ features = [
     "tree-sitter-typescript",
     "tree-sitter-yaml",
 ]
+
+[dev-dependencies]
+tempfile.workspace = true
+# GPUI's headless test platform (the same crates gpui-kit re-exports).
+gpui = { package = "gpui-pre", version = "=0.3.9", features = ["test-support"] }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["test-support"] }

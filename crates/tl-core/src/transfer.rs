@@ -22,7 +22,7 @@ use crate::entry::{Entry, EntryKind};
 use crate::error::{VfsError, VfsResult};
 use crate::path::VPath;
 use crate::progress::Progress;
-use crate::util::unique_name;
+use crate::util::{name_key, unique_name};
 use crate::vfs::{
     MergePolicy, OpCtx, OwnerHint, Resolution, TarSink, TarSource, TransferItem, Vfs, WalkEntry,
 };
@@ -131,6 +131,22 @@ struct Planned {
     existing: Option<Entry>,
 }
 
+/// Items of one folder pair, ready to execute.
+struct Group {
+    src_dir: VPath,
+    dst_dir: VPath,
+    plan: Vec<Planned>,
+}
+
+fn contexts(spec: &TransferSpec, cancel: &CancelToken) -> (OpCtx, OpCtx) {
+    let ctx = |elevated| OpCtx {
+        elevated,
+        owner_hint: OwnerHint::Natural,
+        cancel: cancel.clone(),
+    };
+    (ctx(spec.src_elevated), ctx(spec.dst_elevated))
+}
+
 pub fn run(
     spec: &TransferSpec,
     resolver: &dyn ConflictResolver,
@@ -140,16 +156,7 @@ pub fn run(
     progress.set_phase("Preparing");
     progress.set_indeterminate(true);
     let server_side = spec.is_server_side();
-    let src_ctx = OpCtx {
-        elevated: spec.src_elevated,
-        owner_hint: OwnerHint::Natural,
-        cancel: cancel.clone(),
-    };
-    let dst_ctx = OpCtx {
-        elevated: spec.dst_elevated,
-        owner_hint: OwnerHint::Natural,
-        cancel: cancel.clone(),
-    };
+    let (src_ctx, dst_ctx) = contexts(spec, cancel);
 
     let sources = source_entries(spec, &src_ctx)?;
     if server_side {
@@ -181,31 +188,117 @@ pub fn run(
         .map(|p| p.item.dst.file_name().unwrap_or_default().to_vec())
         .collect();
 
-    if server_side {
-        let elevated = spec.src_elevated || spec.dst_elevated;
-        let ctx = OpCtx {
-            elevated,
-            owner_hint: if elevated && !spec.dst_elevated && spec.mode == TransferMode::Copy {
-                OwnerHint::LoginUser
-            } else {
-                OwnerHint::Natural
-            },
-            cancel: cancel.clone(),
-        };
-        let items: Vec<TransferItem> = plan.into_iter().map(|p| p.item).collect();
-        progress.set_phase(match spec.mode {
-            TransferMode::Copy => "Copying on server",
-            TransferMode::Move => "Moving on server",
-        });
-        match spec.mode {
-            TransferMode::Copy => spec.src.copy_within(&items, &ctx, progress)?,
-            TransferMode::Move => spec.src.move_within(&items, &ctx, progress)?,
-        }
-    } else {
-        stream_transfer(spec, plan, &src_ctx, &dst_ctx, progress)?;
+    let group = Group {
+        src_dir: spec.src_dir.clone(),
+        dst_dir: spec.dst_dir.clone(),
+        plan,
+    };
+    execute(spec, vec![group], &src_ctx, &dst_ctx, progress)?;
+    progress.set_indeterminate(false);
+    Ok(report)
+}
+
+/// One folder of a transfer whose conflicts were settled beforehand (a
+/// sync preview). `rel` is relative to the spec's `src_dir` and `dst_dir`.
+#[derive(Clone, Debug)]
+pub struct PlannedDir {
+    pub rel: Vec<u8>,
+    pub items: Vec<PlannedItem>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PlannedItem {
+    /// The source entry; its name is kept at the destination.
+    pub source: Entry,
+    /// What the destination holds now, which gets replaced; `None` when
+    /// the name is free.
+    pub existing: Option<Entry>,
+}
+
+/// Runs a copy or move whose items and conflicts were decided ahead of
+/// time: nothing is listed or asked, existing destinations are replaced.
+/// `spec.names` and `spec.target_name` are ignored. Same-location
+/// transfers still run server-side, as one provider call for all folders.
+pub fn run_planned(
+    spec: &TransferSpec,
+    dirs: Vec<PlannedDir>,
+    cancel: &CancelToken,
+    progress: &Progress,
+) -> VfsResult<TransferReport> {
+    progress.set_phase("Preparing");
+    progress.set_indeterminate(true);
+    let (src_ctx, dst_ctx) = contexts(spec, cancel);
+    let mut report = TransferReport {
+        server_side: spec.is_server_side(),
+        ..Default::default()
+    };
+    let mut groups = Vec::new();
+    for dir in dirs.into_iter().filter(|d| !d.items.is_empty()) {
+        let src_dir = spec.src_dir.join(&dir.rel);
+        let dst_dir = spec.dst_dir.join(&dir.rel);
+        let plan: Vec<Planned> = dir
+            .items
+            .into_iter()
+            .map(|item| Planned {
+                item: TransferItem {
+                    src: src_dir.child(&item.source.name),
+                    dst: dst_dir.child(&item.source.name),
+                    kind: item.source.kind,
+                    resolution: if item.existing.is_some() {
+                        Resolution::Replace
+                    } else {
+                        Resolution::Create
+                    },
+                },
+                source: item.source,
+                existing: item.existing,
+            })
+            .collect();
+        report.transferred += plan.len();
+        groups.push(Group { src_dir, dst_dir, plan });
+    }
+    if !groups.is_empty() {
+        cancel.check()?;
+        execute(spec, groups, &src_ctx, &dst_ctx, progress)?;
     }
     progress.set_indeterminate(false);
     Ok(report)
+}
+
+/// Copies or moves resolved items: inside the provider when both ends
+/// share a location, as tar streams otherwise.
+fn execute(
+    spec: &TransferSpec,
+    groups: Vec<Group>,
+    src_ctx: &OpCtx,
+    dst_ctx: &OpCtx,
+    progress: &Progress,
+) -> VfsResult<()> {
+    if !spec.is_server_side() {
+        return stream_transfer(spec, groups, src_ctx, dst_ctx, progress);
+    }
+    let elevated = spec.src_elevated || spec.dst_elevated;
+    let ctx = OpCtx {
+        elevated,
+        owner_hint: if elevated && !spec.dst_elevated && spec.mode == TransferMode::Copy {
+            OwnerHint::LoginUser
+        } else {
+            OwnerHint::Natural
+        },
+        cancel: src_ctx.cancel.clone(),
+    };
+    let items: Vec<TransferItem> = groups
+        .into_iter()
+        .flat_map(|g| g.plan.into_iter().map(|p| p.item))
+        .collect();
+    progress.set_phase(match spec.mode {
+        TransferMode::Copy => "Copying on server",
+        TransferMode::Move => "Moving on server",
+    });
+    match spec.mode {
+        TransferMode::Copy => spec.src.copy_within(&items, &ctx, progress),
+        TransferMode::Move => spec.src.move_within(&items, &ctx, progress),
+    }
 }
 
 fn verb(mode: TransferMode) -> &'static str {
@@ -238,16 +331,6 @@ fn source_entries(spec: &TransferSpec, ctx: &OpCtx) -> VfsResult<Vec<Entry>> {
                 .ok_or_else(|| VfsError::NotFound(spec.src_dir.child(name).display()))
         })
         .collect()
-}
-
-fn name_key(name: &[u8], case_insensitive: bool) -> Vec<u8> {
-    if !case_insensitive {
-        return name.to_vec();
-    }
-    match std::str::from_utf8(name) {
-        Ok(s) => s.to_lowercase().into_bytes(),
-        Err(_) => name.to_ascii_lowercase(),
-    }
 }
 
 fn resolve_conflicts(
@@ -394,22 +477,41 @@ struct StreamItem {
 
 fn stream_transfer(
     spec: &TransferSpec,
-    plan: Vec<Planned>,
+    groups: Vec<Group>,
+    src_ctx: &OpCtx,
+    dst_ctx: &OpCtx,
+    progress: &Progress,
+) -> VfsResult<()> {
+    progress.set_phase("Scanning");
+    let src_paths: Vec<VPath> = groups
+        .iter()
+        .flat_map(|g| g.plan.iter().map(|p| p.item.src.clone()))
+        .collect();
+    let totals = spec.src.scan(&src_paths, src_ctx)?;
+    progress.set_totals(totals.bytes, totals.files.max(1));
+    progress.set_indeterminate(false);
+    for group in groups {
+        stream_group(spec, group, src_ctx, dst_ctx, progress)?;
+    }
+    Ok(())
+}
+
+/// Streams one folder's items: one tar stream from `src_dir` into `dst_dir`.
+fn stream_group(
+    spec: &TransferSpec,
+    group: Group,
     src_ctx: &OpCtx,
     dst_ctx: &OpCtx,
     progress: &Progress,
 ) -> VfsResult<()> {
     let cancel = &src_ctx.cancel;
-    progress.set_phase("Scanning");
-    let src_paths: Vec<VPath> = plan.iter().map(|p| p.item.src.clone()).collect();
-    let totals = spec.src.scan(&src_paths, src_ctx)?;
-    progress.set_totals(totals.bytes, totals.files.max(1));
-    progress.set_indeterminate(false);
-
     // Small regular files replacing regular files: rewrite in place.
     let mut streamed = Vec::new();
-    for planned in plan {
+    for planned in group.plan {
+        // Not into archives: they are rewritten anyway, and a stream keeps
+        // the file's time.
         let in_place = planned.item.resolution == Resolution::Replace
+            && spec.dst.host().is_none()
             && planned.source.kind == EntryKind::File
             && planned
                 .existing
@@ -475,8 +577,8 @@ fn stream_transfer(
         .iter()
         .map(|i| i.planned.item.src.file_name().unwrap_or_default().to_vec())
         .collect();
-    let mut source = spec.src.export_tar(&spec.src_dir, &names, src_ctx)?;
-    let mut sink = match spec.dst.import_tar(&spec.dst_dir, dst_ctx) {
+    let mut source = spec.src.export_tar(&group.src_dir, &names, src_ctx)?;
+    let mut sink = match spec.dst.import_tar(&group.dst_dir, dst_ctx) {
         Ok(sink) => sink,
         Err(err) => {
             let _ = source.finish();

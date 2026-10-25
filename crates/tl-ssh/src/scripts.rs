@@ -37,7 +37,19 @@ pub fn with_watchdog(body: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Copy/move primitives used by server-side transfers.
+/// `tl_rm PATH...` — `rm -rf` that always says why it failed. BusyBox rm
+/// gives up without a word on folders it cannot open; that is reported as
+/// `TLERR:EACCES`, so the app offers a retry with sudo as on other servers.
+pub const RM_FUNCTION: &str = r#"
+tl_rm() {
+  tl_e=$(rm -rf -- "$@" 2>&1) && return 0
+  if [ -n "$tl_e" ]; then printf '%s\n' "$tl_e" >&2; else echo TLERR:EACCES >&2; fi
+  return 1
+}
+"#;
+
+/// Copy/move primitives used by server-side transfers; they need
+/// [`RM_FUNCTION`].
 ///
 /// * `tl_xfer MODE SRC DST` — copy (`cp $TL_CP`) or move (`mv`) to a free name.
 /// * `tl_put MODE SRC DST` — replace whatever is at DST.
@@ -50,7 +62,7 @@ pub fn with_watchdog(body: &[u8]) -> Vec<u8> {
 pub const MERGE_FUNCTIONS: &str = r#"
 tl_own() { if [ -n "$TL_OWNER" ]; then chown -R -- "$TL_OWNER" "$1"; fi; }
 tl_xfer() { if [ "$1" = move ]; then mv -- "$2" "$3"; else cp $TL_CP -- "$2" "$3" && tl_own "$3"; fi; }
-tl_put() { rm -rf -- "$3" && tl_xfer "$1" "$2" "$3"; }
+tl_put() { tl_rm "$3" && tl_xfer "$1" "$2" "$3"; }
 tl_merge() {
   for tl_f in "$3"/* "$3"/.[!.]* "$3"/..?*; do
     [ -e "$tl_f" ] || [ -L "$tl_f" ] || continue
@@ -124,7 +136,7 @@ mod tests {
         std::fs::write(root.join("dst/sub/a.txt"), "old").unwrap();
 
         let mut script = Script::new();
-        script.raw(MERGE_FUNCTIONS).raw("TL_CP=-pR\ncd ").arg(root.as_os_str().as_encoded_bytes());
+        script.raw(RM_FUNCTION).raw(MERGE_FUNCTIONS).raw("TL_CP=-pR\ncd ").arg(root.as_os_str().as_encoded_bytes());
         script.raw("\ntl_merge copy skip src dst\n");
         let (code, _, err) = sh(script.as_bytes());
         assert_eq!(code, 0, "{err}");
@@ -133,7 +145,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(root.join("dst/.hidden")).unwrap(), "h");
 
         let mut script = Script::new();
-        script.raw(MERGE_FUNCTIONS).raw("cd ").arg(root.as_os_str().as_encoded_bytes());
+        script.raw(RM_FUNCTION).raw(MERGE_FUNCTIONS).raw("cd ").arg(root.as_os_str().as_encoded_bytes());
         script.raw("\ntl_merge move skip src dst\n");
         let (code, _, err) = sh(script.as_bytes());
         assert_eq!(code, 0, "{err}");
@@ -141,12 +153,31 @@ mod tests {
         assert!(root.join("src/sub/a.txt").exists());
 
         let mut script = Script::new();
-        script.raw(MERGE_FUNCTIONS).raw("cd ").arg(root.as_os_str().as_encoded_bytes());
+        script.raw(RM_FUNCTION).raw(MERGE_FUNCTIONS).raw("cd ").arg(root.as_os_str().as_encoded_bytes());
         script.raw("\ntl_merge move overwrite src dst\n");
         let (code, _, err) = sh(script.as_bytes());
         assert_eq!(code, 0, "{err}");
         assert_eq!(std::fs::read_to_string(root.join("dst/sub/a.txt")).unwrap(), "new");
         assert!(!root.join("src").exists());
+    }
+
+    #[test]
+    fn rm_reports_silent_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("gone");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let mut script = Script::new();
+        script.raw(RM_FUNCTION).raw("tl_rm").sp_arg(dir.as_os_str().as_encoded_bytes());
+        assert_eq!(sh(script.as_bytes()).0, 0);
+        assert!(!dir.exists());
+
+        // BusyBox on a folder it cannot open: no message at all.
+        let (code, _, err) = sh(format!("{RM_FUNCTION}rm() {{ return 1; }}\ntl_rm x").as_bytes());
+        assert_eq!((code, err.trim()), (1, "TLERR:EACCES"));
+        // Messages of other rms pass through untouched.
+        let noisy = "rm() { echo 'rm: x: Read-only file system' >&2; return 1; }";
+        let (code, _, err) = sh(format!("{RM_FUNCTION}{noisy}\ntl_rm x").as_bytes());
+        assert_eq!((code, err.trim()), (1, "rm: x: Read-only file system"));
     }
 
     #[test]

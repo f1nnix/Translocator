@@ -15,6 +15,7 @@ use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{prelude::*, *};
+use tl_core::archive::ArchiveFormat;
 use tl_core::util::{human_size, wildcard_match};
 use tl_core::{Entry, EntryKind, OpCtx, SpaceInfo, VPath, Vfs, VfsError};
 
@@ -64,8 +65,31 @@ impl Location {
         self.vfs.plugin_id() == tl_local::PLUGIN_ID
     }
 
+    /// Inside an archive: the folder that holds the archive file.
+    pub fn archive_folder(&self) -> Option<Location> {
+        self.vfs.host().map(|(vfs, file)| Location {
+            vfs,
+            path: file.parent().unwrap_or_else(VPath::root),
+        })
+    }
+
+    /// The location on a real file system: this one, or for archives the
+    /// same path on the archive's host (`~/site.tar.gz/www`).
+    pub fn on_host(&self) -> Location {
+        match self.vfs.host() {
+            Some((vfs, _)) => Location {
+                vfs,
+                path: self.path.clone(),
+            },
+            None => self.clone(),
+        }
+    }
+
     /// `~/Projects` locally, `deploy@web-1:/etc` remotely.
     pub fn display(&self) -> String {
+        if self.vfs.host().is_some() {
+            return self.on_host().display();
+        }
         if self.is_local() {
             tilde(&self.path)
         } else {
@@ -195,8 +219,8 @@ pub struct TabState {
     pub elevated: bool,
     loading: bool,
     error: Option<SharedString>,
-    back: Vec<VPath>,
-    forward: Vec<VPath>,
+    back: Vec<Location>,
+    forward: Vec<Location>,
     space: Option<SpaceInfo>,
     scroll: UniformListScrollHandle,
     dir_sizes: HashMap<Vec<u8>, u64>,
@@ -232,12 +256,28 @@ impl TabState {
         }
     }
 
+    /// Forgets what was shown for the previous folder.
+    fn reset_view(&mut self) {
+        self.marked.clear();
+        self.dir_sizes.clear();
+        self.error = None;
+        self.cursor = 0;
+        self.anchor = 0;
+        self.rows.clear();
+        self.raw.clear();
+        self.space = None;
+        self.scroll = UniformListScrollHandle::new();
+        self.watcher = None;
+        self.watch_task = None;
+    }
+
     fn title(&self) -> SharedString {
-        let name = self.loc.path.file_name_lossy();
-        if self.loc.is_local() {
+        let loc = self.loc.on_host();
+        let name = loc.path.file_name_lossy();
+        if loc.is_local() {
             name.into()
         } else {
-            format!("{} · {}", self.loc.vfs.label(), name).into()
+            format!("{} · {}", loc.vfs.label(), name).into()
         }
     }
 }
@@ -378,6 +418,40 @@ impl FilePane {
             entries,
             elevated: tab.elevated,
         })
+    }
+
+    /// The entries listed in the active tab (as shown: hidden files only
+    /// when they are visible).
+    pub fn listed_entries(&self) -> Vec<Entry> {
+        self.tab().rows.iter().filter(|r| !r.parent).map(|r| r.entry.clone()).collect()
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.tab().loading
+    }
+
+    /// Names of the marked entries, in display order.
+    #[cfg(test)]
+    pub fn marked(&self) -> Vec<Vec<u8>> {
+        let tab = self.tab();
+        tab.rows
+            .iter()
+            .filter(|r| !r.parent && tab.marked.contains(&r.entry.name))
+            .map(|r| r.entry.name.clone())
+            .collect()
+    }
+
+    /// Marks exactly `names` in the active tab and puts the cursor on the
+    /// first of them.
+    pub fn set_marks(&mut self, names: Vec<Vec<u8>>, cx: &mut Context<Self>) {
+        let tab = self.tab_mut();
+        tab.marked = names.into_iter().collect();
+        if let Some(ix) = tab.rows.iter().position(|r| tab.marked.contains(&r.entry.name)) {
+            tab.cursor = ix;
+            tab.anchor = ix;
+            tab.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+        }
+        cx.notify();
     }
 
     pub fn set_show_hidden(&mut self, show: bool, cx: &mut Context<Self>) {
@@ -522,10 +596,18 @@ impl FilePane {
     }
 
     pub fn navigate(&mut self, path: VPath, select: Option<Vec<u8>>, cx: &mut Context<Self>) {
+        // Above an archive's root: back on the file system that holds it.
+        if let Some((host, file)) = self.location().vfs.host()
+            && !path.starts_with(&file)
+        {
+            self.enter(Location { vfs: host, path }, select, cx);
+            return;
+        }
         self.quick.clear();
         let tab = self.tab_mut();
         if tab.loc.path != path {
-            let old = std::mem::replace(&mut tab.loc.path, path);
+            let old = tab.loc.clone();
+            tab.loc.path = path;
             tab.back.push(old);
             tab.forward.clear();
             tab.marked.clear();
@@ -539,6 +621,48 @@ impl FilePane {
         let ix = self.active;
         self.load(ix, select, cx);
         cx.emit(PaneEvent::LocationChanged);
+    }
+
+    /// Moves the active tab into or out of an archive, keeping its history
+    /// and sudo state.
+    fn enter(&mut self, loc: Location, select: Option<Vec<u8>>, cx: &mut Context<Self>) {
+        self.quick.clear();
+        let tab = self.tab_mut();
+        let old = std::mem::replace(&mut tab.loc, loc);
+        tab.back.push(old);
+        tab.forward.clear();
+        tab.reset_view();
+        let ix = self.active;
+        self.load(ix, select, cx);
+        cx.emit(PaneEvent::LocationChanged);
+    }
+
+    /// Opens the archive `name` in the current folder as a folder.
+    pub fn open_archive(&mut self, name: Vec<u8>, cx: &mut Context<Self>) {
+        let loc = self.location().clone();
+        let ctx = OpCtx::new().elevated(self.elevated());
+        let file = loc.path.child(&name);
+        self.tab_mut().loading = true;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let (host, target) = (loc.vfs.clone(), file.clone());
+            let result = blocking(move || tl_core::archive::open(host, target, &ctx)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.tab_mut().loading = false;
+                // Not if the pane moved on meanwhile.
+                let here = this.location();
+                let moved = here.path != loc.path || !Arc::ptr_eq(&here.vfs, &loc.vfs);
+                match result {
+                    Ok(_) if moved => {}
+                    Ok(vfs) => this.enter(Location { vfs, path: file }, None, cx),
+                    Err(err) => cx.emit(PaneEvent::Error(
+                        format!("Cannot open {}: {err}", String::from_utf8_lossy(&name)).into(),
+                    )),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Switches the active tab to another file system.
@@ -567,10 +691,12 @@ impl FilePane {
         cx.notify();
     }
 
-    /// Replaces every tab on a disconnected file system with the home folder.
+    /// Replaces every tab on a disconnected file system (or inside an
+    /// archive on it) with the home folder.
     pub fn drop_connection(&mut self, vfs: &Arc<dyn Vfs>, cx: &mut Context<Self>) {
         for ix in 0..self.tabs.len() {
-            if Arc::ptr_eq(&self.tabs[ix].loc.vfs, vfs) {
+            let tab_vfs = &self.tabs[ix].loc.vfs;
+            if Arc::ptr_eq(tab_vfs, vfs) || tab_vfs.host().is_some_and(|(host, _)| Arc::ptr_eq(&host, vfs)) {
                 let home = tl_local::local_vfs().home();
                 self.tabs[ix] = TabState::new(Location::local(home), false);
                 self.load(ix, None, cx);
@@ -735,8 +861,29 @@ impl FilePane {
         } else if row.entry.is_dir() {
             let path = self.location().path.child(&row.entry.name);
             self.navigate(path, None, cx);
+        } else if Self::is_archive(&row.entry) && self.location().vfs.host().is_none() {
+            self.open_archive(row.entry.name.clone(), cx);
         } else {
             cx.emit(PaneEvent::OpenFile(row.entry));
+        }
+    }
+
+    /// A file the pane can open as a folder (archives in archives open
+    /// with their app instead).
+    pub fn is_archive(entry: &Entry) -> bool {
+        !entry.is_dir() && ArchiveFormat::detect(&entry.name).is_some()
+    }
+
+    fn open_archive_action(&mut self, _: &OpenArchive, window: &mut Window, cx: &mut Context<Self>) {
+        match self.cursor_row().cloned() {
+            Some(row) if !row.parent && Self::is_archive(&row.entry) => {
+                if self.location().vfs.host().is_some() {
+                    cx.emit(PaneEvent::Error("Archives inside archives cannot be opened as folders.".into()));
+                } else {
+                    self.open_archive(row.entry.name.clone(), cx);
+                }
+            }
+            _ => self.open(&Open, window, cx),
         }
     }
 
@@ -760,12 +907,16 @@ impl FilePane {
     fn go_back(&mut self, _: &GoBack, _: &mut Window, cx: &mut Context<Self>) {
         let tab = self.tab_mut();
         if let Some(prev) = tab.back.pop() {
-            let cur = std::mem::replace(&mut tab.loc.path, prev);
-            let select = cur.file_name().map(<[u8]>::to_vec);
+            let cur = std::mem::replace(&mut tab.loc, prev);
+            // Land on the folder (or archive) we came out of.
+            let select = cur
+                .path
+                .relative_to(&tab.loc.path)
+                .and_then(|rel| rel.split(|b| *b == b'/').next())
+                .filter(|name| !name.is_empty())
+                .map(<[u8]>::to_vec);
             tab.forward.push(cur);
-            tab.marked.clear();
-            tab.cursor = 0;
-            tab.rows.clear();
+            tab.reset_view();
             let ix = self.active;
             self.load(ix, select, cx);
             cx.emit(PaneEvent::LocationChanged);
@@ -775,11 +926,9 @@ impl FilePane {
     fn go_forward(&mut self, _: &GoForward, _: &mut Window, cx: &mut Context<Self>) {
         let tab = self.tab_mut();
         if let Some(next) = tab.forward.pop() {
-            let cur = std::mem::replace(&mut tab.loc.path, next);
+            let cur = std::mem::replace(&mut tab.loc, next);
             tab.back.push(cur);
-            tab.marked.clear();
-            tab.cursor = 0;
-            tab.rows.clear();
+            tab.reset_view();
             let ix = self.active;
             self.load(ix, None, cx);
             cx.emit(PaneEvent::LocationChanged);
@@ -1168,8 +1317,10 @@ impl FilePane {
         let tab = self.tab();
         let loc = &tab.loc;
         let caps = loc.vfs.capabilities();
-        let is_local = loc.is_local();
-        let label: SharedString = if is_local { "Local".into() } else { loc.vfs.label().into() };
+        let in_archive = loc.vfs.host().is_some();
+        let host = loc.on_host();
+        let is_local = host.is_local();
+        let label: SharedString = if is_local { "Local".into() } else { host.vfs.label().into() };
         let elevated = tab.elevated;
         let pane = cx.weak_entity();
 
@@ -1224,7 +1375,13 @@ impl FilePane {
             .border_color(if focused { theme.primary.opacity(0.6) } else { theme.border })
             .child(
                 Button::new("location")
-                    .icon(if is_local { Lucide::HardDrive } else { Lucide::Server })
+                    .icon(if in_archive {
+                        Lucide::FileArchive
+                    } else if is_local {
+                        Lucide::HardDrive
+                    } else {
+                        Lucide::Server
+                    })
                     .label(label)
                     .ghost()
                     .small()
@@ -1455,6 +1612,11 @@ impl Render for FilePane {
         );
         let selection_count = self.selection().map(|s| s.entries.len()).unwrap_or(0);
         let is_local = tab.loc.is_local();
+        // Reveal works for local archives too (it shows the archive file).
+        let local_host = tab.loc.on_host().is_local();
+        let on_archive = self
+            .cursor_row()
+            .is_some_and(|r| !r.parent && Self::is_archive(&r.entry) && tab.loc.vfs.host().is_none());
         let scroll = tab.scroll.clone();
         let this = cx.weak_entity();
 
@@ -1586,6 +1748,13 @@ impl Render for FilePane {
                     .menu_with_disabled("Copy to Other Pane…", Box::new(CopyFiles), selection_count == 0)
                     .menu_with_disabled("Move to Other Pane…", Box::new(MoveFiles), selection_count == 0)
                     .menu_with_disabled("Rename…", Box::new(RenameFile), !one)
+                    .menu_with_disabled("Multi-Rename…", Box::new(MultiRename), selection_count == 0)
+                    .separator()
+                    .when(on_archive, |m| {
+                        m.menu("Open Archive", Box::new(OpenArchive))
+                            .menu("Extract to Other Pane…", Box::new(ExtractArchive))
+                    })
+                    .menu_with_disabled("Pack into Archive…", Box::new(PackFiles), selection_count == 0)
                     .separator()
                     .menu("Copy", Box::new(ClipboardCopy))
                     .menu("Cut", Box::new(ClipboardCut))
@@ -1597,7 +1766,7 @@ impl Render for FilePane {
                     .menu("Calculate Size", Box::new(CalcSize))
                     .menu("Properties…", Box::new(Properties))
                     .separator()
-                    .when(is_local, |m| m.menu("Reveal in Finder", Box::new(RevealInFinder)))
+                    .when(local_host, |m| m.menu("Reveal in Finder", Box::new(RevealInFinder)))
                     .menu("Open Terminal Here", Box::new(OpenTerminal))
                     .separator()
                     .when(is_local, |m| m.menu_with_disabled("Move to Trash", Box::new(TrashFiles), selection_count == 0))
@@ -1625,6 +1794,7 @@ impl Render for FilePane {
             .on_action(cx.listener(Self::mark_by_mask))
             .on_action(cx.listener(Self::unmark_by_mask))
             .on_action(cx.listener(Self::open))
+            .on_action(cx.listener(Self::open_archive_action))
             .on_action(cx.listener(Self::go_parent))
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::go_forward))

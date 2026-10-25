@@ -1,5 +1,6 @@
 //! The local file system, implemented natively with `std::fs`.
 
+mod archive;
 mod fsops;
 mod tarstream;
 mod users;
@@ -11,6 +12,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock};
 
+use tl_core::archive::{ArchiveBackend, ArchiveFormat};
 use tl_core::plugin::FieldKind;
 use tl_core::{
     Bookmark, CancelToken, Capabilities, Entry, EntryKind, ExecOutput, FieldSpec, OpCtx,
@@ -432,6 +434,10 @@ impl Vfs for LocalVfs {
             Ok(true)
         }
         visit(root, &masks.join(";"), ctx, found).map(drop)
+    }
+
+    fn open_archive(&self, path: &VPath, format: ArchiveFormat) -> VfsResult<Arc<dyn ArchiveBackend>> {
+        Ok(Arc::new(archive::LocalArchive::new(path.to_local(), format)))
     }
 
     fn exec(&self, cwd: &VPath, command: &str, ctx: &OpCtx) -> VfsResult<ExecOutput> {

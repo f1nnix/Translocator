@@ -14,6 +14,7 @@ use gpui_kit::component::{
     WindowExt as _, h_flex, h_resizable, resizable_panel, v_flex,
 };
 use gpui_kit::{prelude::*, *};
+use tl_core::archive::{self, ArchiveFormat};
 use tl_core::transfer::{self, TransferMode, TransferReport, TransferSpec};
 use tl_core::util::human_size;
 use tl_core::{Entry, OpCtx, Progress, VPath, Vfs, VfsError, VfsResult};
@@ -155,7 +156,7 @@ impl Workspace {
             PaneEvent::NewBookmark => bookmarks::edit(None, Some(side), cx.weak_entity(), window, cx),
             PaneEvent::ManageBookmarks => bookmarks::manage(cx.weak_entity(), side, window, cx),
             PaneEvent::Disconnect => {
-                let vfs = pane.read(cx).location().vfs.clone();
+                let vfs = pane.read(cx).location().on_host().vfs;
                 self.disconnect(vfs, cx);
             }
             PaneEvent::Dropped(drag) => {
@@ -288,6 +289,19 @@ impl Workspace {
 
     /// How data will travel, shown before a copy/move starts.
     fn route_hint(src: &Arc<dyn Vfs>, dst: &Arc<dyn Vfs>, mode: TransferMode) -> String {
+        let place = |host: &Arc<dyn Vfs>| {
+            if host.plugin_id() == tl_local::PLUGIN_ID {
+                "on this Mac".to_string()
+            } else {
+                format!("on {} with its own tar/zip", host.label())
+            }
+        };
+        if let Some((host, file)) = dst.host() {
+            return format!("Adds to {}; the archive is rewritten {}.", file.file_name_lossy(), place(&host));
+        }
+        if let Some((host, file)) = src.host() {
+            return format!("Extracts from {} {}.", file.file_name_lossy(), place(&host));
+        }
         let verb = match mode {
             TransferMode::Copy => "cp -a",
             TransferMode::Move => "mv",
@@ -324,10 +338,11 @@ impl Workspace {
             format!("{}/", dst_loc.path)
         };
         let hint = Self::route_hint(&sel.vfs, &dst_loc.vfs, mode);
+        let dst_place = dst_loc.on_host();
         let message = format!(
             "{verb} {} to {}:\n{hint}",
             sel.describe(),
-            if dst_loc.is_local() { "this Mac".to_string() } else { dst_loc.vfs.label() }
+            if dst_place.is_local() { "this Mac".to_string() } else { dst_place.vfs.label() }
         );
         let select = 0..target.len();
         let answer = dialogs::ask_input(window, cx, verb, message, target, Some(select.end..select.end), if mode == TransferMode::Copy { "Copy" } else { "Move" });
@@ -464,6 +479,14 @@ impl Workspace {
     ) {
         self.refresh_dir(spec.src.location_key(), &spec.src_dir, cx);
         self.refresh_dir(spec.dst.location_key(), &spec.dst_dir, cx);
+        // An archive that was written to changed size in its folder.
+        for vfs in [&spec.src, &spec.dst] {
+            if let Some((host, file)) = vfs.host()
+                && let Some(dir) = file.parent()
+            {
+                self.refresh_dir(host.location_key(), &dir, cx);
+            }
+        }
         match result {
             Ok(report) => {
                 let mut msg = match report.transferred {
@@ -859,6 +882,13 @@ impl Workspace {
     fn reveal_in_finder(&mut self, _: &RevealInFinder, _: &mut Window, cx: &mut Context<Self>) {
         let pane = self.active_pane().read(cx);
         let loc = pane.location().clone();
+        if let Some((host, file)) = loc.vfs.host() {
+            // Inside an archive: show the archive file.
+            if host.plugin_id() == tl_local::PLUGIN_ID {
+                cx.reveal_path(&file.to_local());
+            }
+            return;
+        }
         if !loc.is_local() {
             return;
         }
@@ -883,7 +913,8 @@ impl Workspace {
 
     fn open_terminal(&mut self, _: &OpenTerminal, window: &mut Window, cx: &mut Context<Self>) {
         let pane = self.active_pane().read(cx);
-        let loc = pane.location().clone();
+        // Inside an archive: the folder that holds it.
+        let loc = pane.location().archive_folder().unwrap_or_else(|| pane.location().clone());
         let elevated = pane.elevated();
         let result = if loc.is_local() {
             std::process::Command::new("open")
@@ -1144,6 +1175,286 @@ impl Workspace {
         );
     }
 
+    // ----- compare, sync, multi-rename -----------------------------------
+
+    /// Marks what differs between the two panes: entries on one side only,
+    /// and the newer of two files that differ.
+    fn compare_dirs(&mut self, _: &CompareDirs, window: &mut Window, cx: &mut Context<Self>) {
+        let (left, right) = (self.left.read(cx), self.right.read(cx));
+        if left.is_loading() || right.is_loading() {
+            self.notify_error("Wait until both panes have loaded.", window, cx);
+            return;
+        }
+        let case_insensitive = left.location().vfs.capabilities().case_insensitive
+            && right.location().vfs.capabilities().case_insensitive;
+        let result = tl_core::compare::compare_listings(&left.listed_entries(), &right.listed_entries(), case_insensitive);
+        let stats = result.stats;
+        self.left.update(cx, |p, cx| p.set_marks(result.left, cx));
+        self.right.update(cx, |p, cx| p.set_marks(result.right, cx));
+        let message = if stats.is_identical() {
+            format!("No differences: {} items match.", stats.same)
+        } else {
+            let mut parts = vec![
+                format!("Left: {} only there, {} newer", stats.only_left, stats.newer_left),
+                format!("Right: {} only there, {} newer", stats.only_right, stats.newer_right),
+            ];
+            if stats.different > 0 {
+                parts.push(format!("{} differ in size only (marked on both sides)", stats.different));
+            }
+            format!("{}. Marked items can be copied with F5.", parts.join(" · "))
+        };
+        window.push_notification(Notification::info(message), cx);
+    }
+
+    fn sync_dirs(&mut self, _: &SyncDirs, window: &mut Window, cx: &mut Context<Self>) {
+        let end = |pane: &Entity<FilePane>, cx: &App| {
+            let p = pane.read(cx);
+            tl_core::sync::SyncEnd {
+                vfs: p.location().vfs.clone(),
+                dir: p.location().path.clone(),
+                elevated: p.elevated(),
+            }
+        };
+        let (left, right) = (end(&self.left, cx), end(&self.right, cx));
+        crate::sync::open(left, right, cx.weak_entity(), window, cx);
+    }
+
+    /// Runs a reviewed sync plan as a job.
+    pub fn start_sync(
+        &mut self,
+        plan: tl_core::sync::SyncPlan,
+        left: tl_core::sync::SyncEnd,
+        right: tl_core::sync::SyncEnd,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let display = |end: &tl_core::sync::SyncEnd| {
+            Location {
+                vfs: end.vfs.clone(),
+                path: end.dir.clone(),
+            }
+            .display()
+        };
+        let title = format!("Synchronize {} ⇄ {}", display(&left), display(&right));
+        let (id, progress, cancel) = self.jobs.update(cx, |j, cx| j.start(title, cx));
+        cx.spawn_in(window, async move |this, cx| {
+            let result = blocking(move || tl_core::sync::apply(&plan, &left, &right, &cancel, &progress)).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                for pane in [&this.left, &this.right] {
+                    pane.update(cx, |p, cx| p.reload(cx));
+                }
+                let status = match result {
+                    Ok(report) => JobStatus::Done(
+                        format!(
+                            "{} → right, {} ← left{}",
+                            report.to_right,
+                            report.to_left,
+                            if report.server_side { " · on server" } else { "" }
+                        )
+                        .into(),
+                    ),
+                    Err(VfsError::Cancelled) => JobStatus::Cancelled,
+                    Err(err) => {
+                        dialogs::error(window, cx, "Synchronization failed", err.to_string());
+                        JobStatus::Failed(err.to_string().into())
+                    }
+                };
+                this.jobs.update(cx, |j, cx| j.finish(id, status, cx));
+            });
+        })
+        .detach();
+    }
+
+    fn multi_rename(&mut self, _: &MultiRename, window: &mut Window, cx: &mut Context<Self>) {
+        let pane = self.active_pane().read(cx);
+        let Some(sel) = pane.selection() else { return };
+        if sel.vfs.host().is_some() {
+            self.notify_error("Files inside archives cannot be renamed. Extract them first.", window, cx);
+            return;
+        }
+        let existing: Vec<Vec<u8>> = pane.listed_entries().into_iter().map(|e| e.name).collect();
+        crate::rename::open(sel, existing, cx.weak_entity(), window, cx);
+    }
+
+    /// Runs the renames planned by the multi-rename dialog. A failure undoes
+    /// the renames already done, so the folder ends up as it was.
+    pub fn apply_renames(
+        &mut self,
+        sel: crate::pane::Selection,
+        steps: Vec<tl_core::multirename::Rename>,
+        count: usize,
+        select: Vec<u8>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let dir = sel.dir.clone();
+        let key = sel.vfs.location_key().to_string();
+        let work_dir = dir.clone();
+        self.run_op(
+            Some(format!("Rename {count} item{}", if count == 1 { "" } else { "s" })),
+            sel.vfs.clone(),
+            sel.elevated,
+            Arc::new(move |vfs, ctx, progress| tl_core::multirename::apply(vfs, &work_dir, &steps, ctx, progress)),
+            Box::new(move |this, result, window, cx| match result {
+                Ok(()) => this.select_in_panes(&key, &dir, select, cx),
+                Err(err) => {
+                    this.refresh_dir(&key, &dir, cx);
+                    if !err.is_cancelled() {
+                        let message = err.to_string();
+                        let title = if message.contains("Undoing") {
+                            "Rename failed"
+                        } else {
+                            "Rename failed; the folder was left as it was"
+                        };
+                        dialogs::error(window, cx, title, message);
+                    }
+                }
+            }),
+            window,
+            cx,
+        );
+    }
+
+    // ----- archives -------------------------------------------------------
+
+    /// Unpacks the selected archives into a folder of the other pane.
+    fn extract_archive(&mut self, _: &ExtractArchive, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sel) = self.active_pane().read(cx).selection() else { return };
+        let archives: Vec<Entry> = sel.entries.iter().filter(|e| FilePane::is_archive(e)).cloned().collect();
+        if archives.is_empty() || sel.vfs.host().is_some() {
+            self.notify_error("Select one or more .zip, .tar or .tar.gz files to extract.", window, cx);
+            return;
+        }
+        let dst = self.other_pane().read(cx);
+        let (dst_loc, dst_elevated) = (dst.location().clone(), dst.elevated());
+        let what = match archives.as_slice() {
+            [one] => format!("“{}”", one.name_lossy()),
+            many => format!("{} archives", many.len()),
+        };
+        let target = if dst_loc.path.is_root() { "/".to_string() } else { format!("{}/", dst_loc.path) };
+        let place = dst_loc.on_host();
+        let message = format!(
+            "Extract {what} into this folder on {} (created if missing):",
+            if place.is_local() { "this Mac".to_string() } else { place.vfs.label() }
+        );
+        let end = target.len();
+        let answer = dialogs::ask_input(window, cx, "Extract", message, target, Some(end..end), "Extract");
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(text) = answer.await.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) else { return };
+            let dst_vfs = dst_loc.vfs.clone();
+            let base = dst_loc.path.clone();
+            let src = sel.clone();
+            let opened = blocking(move || {
+                let target = resolve_input(&dst_vfs, &base, &text);
+                let ctx = OpCtx::new().elevated(dst_elevated);
+                let mut path = VPath::root();
+                for part in target.components() {
+                    path = path.child(part);
+                    if dst_vfs.stat(&path, &ctx)?.is_none() {
+                        dst_vfs.mkdir(&path, &ctx)?;
+                    }
+                }
+                let src_ctx = OpCtx::new().elevated(src.elevated);
+                let mut out = Vec::new();
+                for entry in &archives {
+                    let file = src.dir.child(&entry.name);
+                    let av = archive::open(src.vfs.clone(), file.clone(), &src_ctx)?;
+                    let names: Vec<Vec<u8>> = av.list(&file, &src_ctx)?.into_iter().map(|e| e.name).collect();
+                    out.push((av as Arc<dyn Vfs>, file, names));
+                }
+                Ok((target, out))
+            })
+            .await;
+            let _ = this.update_in(cx, move |this, window, cx| match opened {
+                Ok((target, archives)) => {
+                    for (av, file, names) in archives.into_iter().filter(|(_, _, n)| !n.is_empty()) {
+                        let spec = TransferSpec {
+                            mode: TransferMode::Copy,
+                            src: av,
+                            src_dir: file,
+                            names,
+                            src_elevated: sel.elevated,
+                            dst: dst_loc.vfs.clone(),
+                            dst_dir: target.clone(),
+                            dst_elevated,
+                            target_name: None,
+                        };
+                        this.start_transfer(spec, window, cx);
+                    }
+                }
+                Err(err) => this.notify_error(err.to_string(), window, cx),
+            });
+        })
+        .detach();
+    }
+
+    /// Packs the selection into an archive in the other pane's folder;
+    /// an existing archive of that name gets the files added.
+    fn pack_files(&mut self, _: &PackFiles, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(sel) = self.active_pane().read(cx).selection() else { return };
+        let dst = self.other_pane().read(cx);
+        let (dst_loc, dst_elevated) = (dst.location().clone(), dst.elevated());
+        if dst_loc.vfs.host().is_some() {
+            self.notify_error("The other pane is inside an archive. Copy (F5) adds files to it.", window, cx);
+            return;
+        }
+        let stem = match sel.entries.as_slice() {
+            [one] if one.is_dir() => one.name_lossy(),
+            [one] => String::from_utf8_lossy(tl_core::entry::split_extension(&one.name).0).into_owned(),
+            _ => sel.dir.file_name().map(|n| String::from_utf8_lossy(n).into_owned()).unwrap_or_else(|| "archive".into()),
+        };
+        let prefix = if dst_loc.path.is_root() { "/".to_string() } else { format!("{}/", dst_loc.path) };
+        let initial = format!("{prefix}{stem}.tar.gz");
+        let select = prefix.len()..prefix.len() + stem.len();
+        let place = dst_loc.on_host();
+        let message = format!(
+            "Pack {} into an archive on {}. The extension picks the format: .tar.gz, .tgz, .tar or .zip. An existing archive gets the files added.",
+            sel.describe(),
+            if place.is_local() { "this Mac".to_string() } else { place.vfs.label() }
+        );
+        let answer = dialogs::ask_input(window, cx, "Pack", message, initial, Some(select), "Pack");
+        cx.spawn_in(window, async move |this, cx| {
+            let Some(text) = answer.await.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) else { return };
+            let dst_vfs = dst_loc.vfs.clone();
+            let base = dst_loc.path.clone();
+            let opened = blocking(move || {
+                let file = resolve_input(&dst_vfs, &base, &text);
+                let name = file.file_name().unwrap_or_default().to_vec();
+                let format = ArchiveFormat::detect(&name).ok_or_else(|| {
+                    VfsError::other(format!("“{}” does not end in .tar.gz, .tgz, .tar or .zip", String::from_utf8_lossy(&name)))
+                })?;
+                let ctx = OpCtx::new().elevated(dst_elevated);
+                if dst_vfs.stat(&file, &ctx)?.is_none() {
+                    dst_vfs.write_file(&file, &format.empty_archive(), &ctx)?;
+                }
+                let av = archive::open(dst_vfs.clone(), file.clone(), &ctx)?;
+                Ok((av as Arc<dyn Vfs>, file))
+            })
+            .await;
+            let _ = this.update_in(cx, move |this, window, cx| match opened {
+                Ok((av, file)) => {
+                    if let Some(dir) = file.parent() {
+                        this.refresh_dir(dst_loc.vfs.location_key(), &dir, cx);
+                    }
+                    let spec = TransferSpec {
+                        mode: TransferMode::Copy,
+                        src: sel.vfs.clone(),
+                        src_dir: sel.dir.clone(),
+                        names: sel.names(),
+                        src_elevated: sel.elevated,
+                        dst: av,
+                        dst_dir: file,
+                        dst_elevated,
+                        target_name: None,
+                    };
+                    this.start_transfer(spec, window, cx);
+                }
+                Err(err) => this.notify_error(err.to_string(), window, cx),
+            });
+        })
+        .detach();
+    }
+
     // ----- panes ----------------------------------------------------------
 
     fn switch_pane(&mut self, _: &SwitchPane, window: &mut Window, cx: &mut Context<Self>) {
@@ -1290,7 +1601,7 @@ impl Workspace {
     }
 
     fn disconnect_action(&mut self, _: &Disconnect, _: &mut Window, cx: &mut Context<Self>) {
-        let vfs = self.active_pane().read(cx).location().vfs.clone();
+        let vfs = self.active_pane().read(cx).location().on_host().vfs;
         self.disconnect(vfs, cx);
     }
 
@@ -1644,6 +1955,11 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::calc_size))
             .on_action(cx.listener(Self::properties))
             .on_action(cx.listener(Self::find_files))
+            .on_action(cx.listener(Self::compare_dirs))
+            .on_action(cx.listener(Self::sync_dirs))
+            .on_action(cx.listener(Self::multi_rename))
+            .on_action(cx.listener(Self::extract_archive))
+            .on_action(cx.listener(Self::pack_files))
             .on_action(cx.listener(Self::locations_left))
             .on_action(cx.listener(Self::locations_right))
             .on_action(cx.listener(Self::clipboard_copy))
@@ -1692,8 +2008,22 @@ fn tl_cursor(lines: u32) -> gpui_kit::component::input::Position {
     gpui_kit::component::input::Position::new(lines, 0)
 }
 
+/// A path typed into a dialog: `~`, `~/x`, absolute, or relative to `base`.
+fn resolve_input(vfs: &Arc<dyn Vfs>, base: &VPath, text: &str) -> VPath {
+    if text == "~" {
+        vfs.home()
+    } else if let Some(rest) = text.strip_prefix("~/") {
+        vfs.home().join(rest)
+    } else {
+        base.join(text)
+    }
+}
+
 /// `/local/path` or `user@host:/remote/path`.
 pub fn full_path(vfs: &Arc<dyn Vfs>, path: &VPath) -> String {
+    if let Some((host, _)) = vfs.host() {
+        return full_path(&host, path);
+    }
     if vfs.plugin_id() == tl_local::PLUGIN_ID {
         path.display()
     } else {

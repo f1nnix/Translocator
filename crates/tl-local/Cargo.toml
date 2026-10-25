@@ -9,11 +9,13 @@ publish = false
 [dependencies]
 tl-core.workspace = true
 filetime.workspace = true
+flate2.workspace = true
 libc.workspace = true
 log.workspace = true
 parking_lot.workspace = true
 tar.workspace = true
 trash.workspace = true
+zip.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -16,3 +16,4 @@ parking_lot.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 tl-local.workspace = true
+zip.workspace = true

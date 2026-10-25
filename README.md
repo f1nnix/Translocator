@@ -19,9 +19,9 @@ scripts/bundle.sh --release  # release build → target/release/Translocator.app
 
 | Crate | What it holds |
 |---|---|
-| `crates/tl-core` | Provider-neutral `Vfs` trait, plugin registry, bookmarks, askpass bridge, transfer engine |
-| `crates/tl-local` | Local file system (`std::fs`, APFS clones, Trash) |
-| `crates/tl-ssh` | SSH plugin: ControlMaster, command protocol, sudo, listings, tar streams |
+| `crates/tl-core` | Provider-neutral `Vfs` trait, plugin registry, bookmarks, askpass bridge, transfer engine, directory compare and sync, multi-rename, archives as folders |
+| `crates/tl-local` | Local file system (`std::fs`, APFS clones, Trash), archives via the `tar`, `flate2` and `zip` crates |
+| `crates/tl-ssh` | SSH plugin: ControlMaster, command protocol, sudo, listings, tar streams, archives with the server's `tar` / `unzip` / `zip` |
 | `crates/translocator` | The gpui application |
 
 ## How copies and moves are routed
@@ -48,6 +48,51 @@ Skip / Keep Both, and for folders Merge (replace, replace older, or keep
 existing), with "apply to all". On servers, merges run as a portable shell
 function on the server (`tl_merge` in `crates/tl-ssh/src/scripts.rs`); a move
 that keeps some files back leaves exactly those files in the source.
+
+## Compare, synchronize, multi-rename
+
+* **Compare directories** (⇧F2) marks what differs in both panes: entries
+  that exist on one side only and, of two files with the same name, the
+  newer one (both, when the times match but the sizes do not). Times less
+  than two seconds apart count as equal (FAT). Folders on both sides are not
+  descended into. Copy the marked items with F5.
+* **Synchronize directories** (⌘⌥S) compares the two panes' folders,
+  subfolders included, and lists what would be copied each way: the newer
+  file wins, what exists on one side only is copied over (a missing folder as
+  a whole), and items that differ without a newer side wait for you. Click an
+  item's arrow to change its direction or leave it alone; Both ways / Left →
+  right / Right → left resets the suggestions. Nothing is ever deleted.
+  Synchronize compares again first and stops if anything it would copy
+  changed since the preview; the copies then go through the transfer engine,
+  so between two folders on one server they are server-side `cp -a`.
+* **Multi-rename** (⌃M) renames the marked files from a name mask and an
+  extension mask — `[N]` name, `[E]` extension, `[N2-5]` characters,
+  `[C]` counter (start, step, digits), `[P]` folder, `[YMD]` / `[hms]` and
+  their parts for the modification time — then find & replace (plain, or
+  regex with `$1`) and case conversion, with a live preview. Clashes are
+  flagged before anything is renamed; chains and swaps (`a → b`, `b → a`) go
+  through temporary names, and if one rename fails the ones already done are
+  undone. On servers the whole batch is one command.
+
+## Archives
+
+tar, tar.gz / tgz and zip files open like folders (Enter or ⌃PgDn), and `..`
+at the archive's root leads back out. Copying out of an archive extracts,
+copying into one adds (replacing members of the same name); F7, ⇧F4, F8 and
+the editor work inside archives too. ⌥F9 unpacks the selected archives into a
+folder of the other pane; ⌥F5 packs the selection into a new or existing
+archive there, the extension picking the format.
+
+* **On this Mac** archives are read and written in-process. A change writes a
+  new archive next to the old one and renames it into place.
+* **On servers** the server's tools do the work. Listings parse `tar -tv`
+  (GNU tar, bsdtar or BusyBox) or read just the zip's central directory with
+  `tail -c` (`unzip -l` mangles non-ASCII names). Extracting unpacks the
+  chosen members with `tar -x` / `unzip -o` into a temporary folder on the
+  server and streams them back as tar. A change unpacks the archive there,
+  applies it, packs again with `tar -c` / `zip` and swaps the result in,
+  keeping the archive's owner and mode. Changing zip archives needs `zip` on
+  the server.
 
 ## The SSH command protocol
 
@@ -95,6 +140,12 @@ that keeps some files back leaves exactly those files in the source.
 | ⌘I | Properties: permissions (chmod), owner and group (chown) |
 | ⌥Enter | Calculate folder size |
 | ⌘F / ⌥F7 | Find files (`find` runs on the server) |
+| ⇧F2 / ⌘⇧C | Compare directories: mark what differs |
+| ⌘⌥S | Synchronize directories |
+| ⌃M / ⌘⇧M | Multi-rename the marked files |
+| Enter, ⌃PgDn | Open a tar, tar.gz or zip file as a folder |
+| ⌥F9 / ⌘⌥E | Extract the selected archives to the other pane |
+| ⌥F5 / ⌘⌥P | Pack the selection into an archive in the other pane |
 | ⌘K, ⌥F1 / ⌥F2 | Locations: this Mac, volumes, bookmarks |
 | ⌘⇧G / ⌘L | Go to folder |
 | ⌘[ ⌘] | Back / forward |
@@ -126,17 +177,55 @@ cargo test --workspace
 ```
 
 The SSH plugin's end-to-end tests (`crates/tl-ssh/tests/fake_ssh.rs`) run every
-scenario against a fake `ssh` that executes commands locally, once with the
-system's BSD tools and once with Homebrew's GNU tools when installed. Point
-them at a real server that sees this machine's file system (for example an
-`sshd` on localhost) to run them over real SSH as well:
+scenario against a fake `ssh` that executes commands locally, and a fake `sudo`
+that wants a password: with the system's BSD tools and, when Homebrew's GNU
+tools are installed, with GNU coreutils over BSD find (the `stat -c` listings
+BusyBox servers get) and with GNU coreutils plus findutils.
+
+To run them over real SSH against Linux servers as well, start two throwaway
+Docker containers (sshd on 127.0.0.1 only, sudo behind a password, your
+`~/.ssh` untouched):
 
 ```bash
-TL_SSH_TEST_HOST=127.0.0.1 TL_SSH_TEST_PORT=2222 TL_SSH_TEST_KEY=~/.ssh/test_key cargo test -p tl-ssh
+scripts/ssh-test-servers.sh up
 ```
+
+```bash
+scripts/ssh-test-servers.sh test
+```
+
+```bash
+scripts/ssh-test-servers.sh down
+```
+
+Any other server that sees this machine's file system at the same paths works
+too; see `real_server()` in the tests for the `TL_SSH_TEST_*` variables.
+
+Verified servers:
+
+| Server | Tools | Login shell | Listings | sudo |
+|---|---|---|---|---|
+| Debian 13, OpenSSH 10.0 | GNU coreutils 9.7, findutils 4.10, tar 1.35 | bash | `find -printf` | 1.9.16, password |
+| Alpine 3.22, OpenSSH 10.0 | BusyBox 1.37 (ash, find, stat, tar) | ash | `stat -c` | 1.9.17, password |
+| macOS (local sshd) | BSD tools, optionally Homebrew's GNU tools | zsh, sh | `stat -f`, `find -printf` | fake only |
+
+Not verified yet: Ubuntu 25.10 and later (uutils coreutils, sudo-rs), RHEL
+and its relatives, zsh or fish as the login shell on Linux, sudo without a
+password on Linux, and sudo to a user other than root.
+
+`crates/tl-ssh/tests/archives.rs` checks archives on a server through the
+provider alone, so it runs against any server, shared files or not:
+`TL_SSH_ARCHIVE_TEST_HOST` (with `_PORT`, `_KEY`, `_EXTRA`), or the
+`TL_SSH_TEST_*` server above. It has passed with GNU tar and Info-ZIP
+(Debian), BusyBox tar and unzip (Alpine) and bsdtar with Info-ZIP (macOS).
+The app's own tests (`crates/translocator/src/ui_tests.rs`) drive the real
+workspace in a headless window: compare, multi-rename, sync, and opening,
+extracting, packing and adding to archives.
 
 ## Not yet
 
-Archives as folders, directory compare/sync, multi-rename, an SFTP and an S3
-plugin, and Linux/Windows packaging. Names containing newlines are listed
-correctly only on servers with GNU find.
+An SFTP and an S3 plugin, Linux/Windows packaging, a mirror mode for sync
+(deleting what the other side lacks), more archive formats (tar.bz2, tar.xz,
+7z), renaming inside archives, and archives inside archives. Extracting an
+archive into another folder on the same server streams through this Mac.
+Names containing newlines are listed correctly only on servers with GNU find.

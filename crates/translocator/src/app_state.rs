@@ -151,6 +151,32 @@ pub fn init(cx: &mut App) {
     .detach();
 }
 
+/// State for UI tests: no askpass server, bookmarks and settings kept in
+/// `dir` (the user's own files are never read or written).
+#[cfg(test)]
+pub fn init_for_tests(cx: &mut App, dir: &std::path::Path, settings: Settings) {
+    let mut registry = PluginRegistry::new();
+    registry.register(Arc::new(tl_ssh::SshPlugin));
+    registry.register(Arc::new(tl_local::LocalPlugin));
+    let bridge = bridge::start(cx);
+    let env = PluginEnv {
+        prompter: Arc::new(bridge.clone()),
+        askpass: None,
+        runtime_dir: dir.to_path_buf(),
+    };
+    cx.set_global(AppState {
+        registry,
+        bookmarks: BookmarkStore::load(dir.join("bookmarks.json")),
+        connections: Vec::new(),
+        env,
+        bridge,
+        settings,
+        clipboard: None,
+        main_window: None,
+        _askpass: None,
+    });
+}
+
 impl AppState {
     pub fn connection(&self, bookmark_id: &str) -> Option<Arc<dyn Vfs>> {
         self.connections

@@ -64,15 +64,38 @@ fn join(worker: Option<JoinHandle<VfsResult<()>>>) -> VfsResult<()> {
     }
 }
 
-pub fn export(base: PathBuf, names: Vec<Vec<u8>>, cancel: CancelToken) -> VfsResult<LocalTarSource> {
+/// A tar stream written by `produce` on a helper thread.
+pub fn spawn_source(
+    name: &str,
+    produce: impl FnOnce(PipeWriter) -> VfsResult<()> + Send + 'static,
+) -> VfsResult<LocalTarSource> {
     let (reader, writer) = io::pipe()?;
     let worker = std::thread::Builder::new()
-        .name("tar-pack".into())
-        .spawn(move || pack(&base, &names, writer, &cancel))?;
+        .name(name.into())
+        .spawn(move || produce(writer))?;
     Ok(LocalTarSource {
         reader: Some(reader),
         worker: Some(worker),
     })
+}
+
+/// A sink whose stream `consume` reads on a helper thread.
+pub fn spawn_sink(
+    name: &str,
+    consume: impl FnOnce(PipeReader) -> VfsResult<()> + Send + 'static,
+) -> VfsResult<LocalTarSink> {
+    let (reader, writer) = io::pipe()?;
+    let worker = std::thread::Builder::new()
+        .name(name.into())
+        .spawn(move || consume(reader))?;
+    Ok(LocalTarSink {
+        writer: Some(writer),
+        worker: Some(worker),
+    })
+}
+
+pub fn export(base: PathBuf, names: Vec<Vec<u8>>, cancel: CancelToken) -> VfsResult<LocalTarSource> {
+    spawn_source("tar-pack", move |writer| pack(&base, &names, writer, &cancel))
 }
 
 fn pack(base: &Path, names: &[Vec<u8>], writer: PipeWriter, cancel: &CancelToken) -> VfsResult<()> {
@@ -144,14 +167,7 @@ fn append(
 }
 
 pub fn import(dir: PathBuf, cancel: CancelToken) -> VfsResult<LocalTarSink> {
-    let (reader, writer) = io::pipe()?;
-    let worker = std::thread::Builder::new()
-        .name("tar-unpack".into())
-        .spawn(move || unpack(&dir, reader, &cancel))?;
-    Ok(LocalTarSink {
-        writer: Some(writer),
-        worker: Some(worker),
-    })
+    spawn_sink("tar-unpack", move |reader| unpack(&dir, reader, &cancel))
 }
 
 fn unpack(dir: &Path, reader: PipeReader, cancel: &CancelToken) -> VfsResult<()> {
