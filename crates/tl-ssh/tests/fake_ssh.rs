@@ -185,7 +185,16 @@ fn real_server() -> Option<Setup> {
 }
 
 fn setups() -> Vec<Setup> {
-    let mut variants = vec![(String::new(), Dialect::StatF)];
+    // No PATH prefix means the system's own tools, which differ by host:
+    // BSD on macOS, GNU on Linux. The Homebrew variants below exist only on
+    // macOS, so a Linux run covers the GNU dialect and leaves the other two
+    // to the unit tests in listing.rs and to scripts/ssh-test-servers.sh.
+    let system = if cfg!(target_os = "macos") {
+        Dialect::StatF
+    } else {
+        Dialect::Gnu
+    };
+    let mut variants = vec![(String::new(), system)];
     if Path::new(GNU_COREUTILS).exists() {
         variants.push((format!("{GNU_COREUTILS}:"), Dialect::StatC));
         if Path::new(GNU_FINDUTILS).exists() {
