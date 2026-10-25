@@ -1,18 +1,50 @@
 # Translocator
 
-A classic dual-pane file manager for macOS, written in Rust on
+[![Linux](https://github.com/f1nnix/Translocator/actions/workflows/linux.yml/badge.svg)](https://github.com/f1nnix/Translocator/actions/workflows/linux.yml)
+
+A classic dual-pane file manager for macOS and Linux, written in Rust on
 [gpui](https://gpui.rs) and [gpui-component](https://gpui-kit.com). Remote
 locations are plugins; the first one, **SSH**, does not use SFTP: it drives a
 plain shell on the server through your own OpenSSH client, so working with a
 server feels exactly like working in a terminal there — `cp`, `mv`, `chmod`,
 `sudo` and all.
 
+## Building
+
+On **macOS**, this wraps the binary in an app bundle:
+
 ```bash
-scripts/bundle.sh            # debug build → target/debug/Translocator.app
+scripts/bundle.sh --release   # → target/release/Translocator.app
+```
+
+On **Linux**, install the system libraries once (the script knows apt and
+dnf), then build normally:
+
+```bash
+sudo scripts/linux-deps.sh build
 ```
 
 ```bash
-scripts/bundle.sh --release  # release build → target/release/Translocator.app
+cargo build --release -p translocator
+```
+
+## Packages and CI
+
+`.github/workflows/linux.yml` builds every push on Ubuntu 24.04 and Fedora,
+runs the test suite on both, and uploads a `.deb` and an `.rpm` as run
+artifacts; each job also installs its own package, so a missing dependency
+fails the build. Pushing a `v*` tag attaches both packages to a GitHub
+release. macOS is not in CI yet: releasing it needs signing and notarization
+keys.
+
+To build the packages by hand, on the matching distribution:
+
+```bash
+cargo deb -p translocator            # → target/debian/*.deb
+```
+
+```bash
+cargo generate-rpm -p crates/translocator   # → target/generate-rpm/*.rpm
 ```
 
 ## Layout
@@ -224,7 +256,7 @@ extracting, packing and adding to archives.
 
 ## Not yet
 
-An SFTP and an S3 plugin, Linux/Windows packaging, a mirror mode for sync
+An SFTP and an S3 plugin, Windows support, a mirror mode for sync
 (deleting what the other side lacks), more archive formats (tar.bz2, tar.xz,
 7z), renaming inside archives, and archives inside archives. Extracting an
 archive into another folder on the same server streams through this Mac.

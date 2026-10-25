@@ -12,6 +12,7 @@ mod pane;
 mod properties;
 mod rename;
 mod sync;
+mod terminal;
 #[cfg(test)]
 mod ui_tests;
 mod util;

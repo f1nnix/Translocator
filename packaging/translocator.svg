@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+  <title>Translocator</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#1e3a8a"/>
+    </linearGradient>
+  </defs>
+
+  <!-- App tile -->
+  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#bg)"/>
+
+  <!-- Left pane: header bar plus file rows -->
+  <g>
+    <rect x="20" y="34" width="32" height="60" rx="5" fill="#ffffff" opacity="0.95"/>
+    <rect x="20" y="34" width="32" height="10" rx="5" fill="#0f172a" opacity="0.28"/>
+    <rect x="25" y="51" width="22" height="3.5" rx="1.75" fill="#1e3a8a" opacity="0.75"/>
+    <rect x="25" y="60" width="22" height="3.5" rx="1.75" fill="#1e3a8a" opacity="0.55"/>
+    <rect x="25" y="69" width="22" height="3.5" rx="1.75" fill="#1e3a8a" opacity="0.55"/>
+    <rect x="25" y="78" width="14" height="3.5" rx="1.75" fill="#1e3a8a" opacity="0.4"/>
+  </g>
+
+  <!-- Right pane: the remote side, marked by a selected row -->
+  <g>
+    <rect x="76" y="34" width="32" height="60" rx="5" fill="#ffffff" opacity="0.95"/>
+    <rect x="76" y="34" width="32" height="10" rx="5" fill="#0f172a" opacity="0.28"/>
+    <rect x="81" y="51" width="22" height="3.5" rx="1.75" fill="#1e3a8a" opacity="0.55"/>
+    <rect x="81" y="60" width="22" height="3.5" rx="1.75" fill="#22c55e" opacity="0.95"/>
+    <rect x="81" y="69" width="22" height="3.5" rx="1.75" fill="#1e3a8a" opacity="0.55"/>
+    <rect x="81" y="78" width="14" height="3.5" rx="1.75" fill="#1e3a8a" opacity="0.4"/>
+  </g>
+
+  <!-- Transfer arrow between the panes -->
+  <path d="M55 60 L64 60 L64 54 L73 64 L64 74 L64 68 L55 68 Z" fill="#ffffff"/>
+</svg>

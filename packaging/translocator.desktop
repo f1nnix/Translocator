@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Translocator
+GenericName=File Manager
+Comment=Dual-pane file manager with SSH connections
+Exec=translocator
+Icon=translocator
+Terminal=false
+Categories=Utility;FileTools;FileManager;
+Keywords=file;manager;ssh;remote;commander;dual-pane;sftp;
+StartupNotify=true
+StartupWMClass=Translocator

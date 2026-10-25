@@ -1766,7 +1766,7 @@ impl Render for FilePane {
                     .menu("Calculate Size", Box::new(CalcSize))
                     .menu("Properties…", Box::new(Properties))
                     .separator()
-                    .when(local_host, |m| m.menu("Reveal in Finder", Box::new(RevealInFinder)))
+                    .when(local_host, |m| m.menu(crate::util::REVEAL_LABEL, Box::new(RevealInFinder)))
                     .menu("Open Terminal Here", Box::new(OpenTerminal))
                     .separator()
                     .when(is_local, |m| m.menu_with_disabled("Move to Trash", Box::new(TrashFiles), selection_count == 0))

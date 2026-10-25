@@ -917,14 +917,10 @@ impl Workspace {
         let loc = pane.location().archive_folder().unwrap_or_else(|| pane.location().clone());
         let elevated = pane.elevated();
         let result = if loc.is_local() {
-            std::process::Command::new("open")
-                .args(["-a", "Terminal"])
-                .arg(loc.path.to_local())
-                .spawn()
-                .map(drop)
+            crate::terminal::open(Some(&loc.path.to_local()), None)
         } else {
             match loc.vfs.terminal_command(&loc.path, elevated) {
-                Some(argv) => launch_in_terminal(&argv),
+                Some(argv) => crate::terminal::open(None, Some(&argv)),
                 None => Ok(()),
             }
         };
@@ -2041,25 +2037,3 @@ fn uuid_like() -> String {
     tl_core::Bookmark::new("", "").id
 }
 
-/// Opens Terminal.app running `argv` (through a temporary .command file,
-/// which needs no automation permission).
-fn launch_in_terminal(argv: &[String]) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = dirs::cache_dir().unwrap_or_else(std::env::temp_dir).join("Translocator");
-    std::fs::create_dir_all(&dir)?;
-    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let script = dir.join(format!("terminal-{}-{n}.command", std::process::id()));
-    let line = argv
-        .iter()
-        .map(|a| tl_core::shell::quote_str(a))
-        .collect::<Vec<_>>()
-        .join(" ");
-    std::fs::write(&script, format!("#!/bin/sh\nrm -f \"$0\"\nexec {line}\n"))?;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
-    std::process::Command::new("open")
-        .args(["-a", "Terminal"])
-        .arg(&script)
-        .spawn()
-        .map(drop)
-}

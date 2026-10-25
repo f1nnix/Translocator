@@ -1,0 +1,150 @@
+name: Linux
+
+# Ubuntu and Fedora are built on their own distribution, because each package
+# links against that distribution's glibc and libraries. macOS is not here
+# yet: releasing it needs signing and notarization keys.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch makes an in-flight run pointless.
+concurrency:
+  group: linux-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Plain backtraces on a failing test, without the noise of full ones.
+  RUST_BACKTRACE: 1
+
+jobs:
+  ubuntu:
+    name: Ubuntu 24.04 · deb
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: sudo scripts/linux-deps.sh build
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ubuntu-24.04
+
+      - name: Build
+        run: cargo build --locked --release -p translocator
+
+      - name: Test
+        run: cargo test --locked --workspace
+
+      - name: Build .deb
+        run: |
+          cargo install cargo-deb --locked --version ^3
+          cargo deb -p translocator --no-build
+
+      - name: Check the package
+        run: |
+          deb=$(ls target/debian/*.deb)
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb"
+          # Installing proves the declared dependencies can be satisfied.
+          sudo apt-get install -y "./$deb"
+          command -v translocator
+          # Every shared library the binary needs must now resolve.
+          ldd "$(command -v translocator)"
+          ! ldd "$(command -v translocator)" | grep -q "not found"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: translocator-deb
+          path: target/debian/*.deb
+          if-no-files-found: error
+
+  fedora:
+    name: Fedora · rpm
+    runs-on: ubuntu-24.04
+    container: fedora:latest
+    steps:
+      # actions/checkout wants git, and the Fedora image ships without it.
+      - name: Install git
+        run: dnf install -y git-core
+
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: scripts/linux-deps.sh build
+
+      - name: Install Rust
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+            | sh -s -- -y --profile minimal --default-toolchain stable
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Show toolchain
+        run: rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: fedora-latest
+
+      - name: Build
+        run: cargo build --locked --release -p translocator
+
+      - name: Test
+        run: cargo test --locked --workspace
+
+      - name: Build .rpm
+        run: |
+          cargo install cargo-generate-rpm --locked --version ^0.21
+          cargo generate-rpm -p crates/translocator
+
+      - name: Check the package
+        run: |
+          rpm=$(ls target/generate-rpm/*.rpm)
+          rpm -qip "$rpm"
+          rpm -qlp "$rpm"
+          # Installing proves the declared dependencies can be satisfied.
+          dnf install -y "$rpm"
+          command -v translocator
+          # Every shared library the binary needs must now resolve.
+          ldd "$(command -v translocator)"
+          ! ldd "$(command -v translocator)" | grep -q "not found"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: translocator-rpm
+          path: target/generate-rpm/*.rpm
+          if-no-files-found: error
+
+  release:
+    name: Attach packages to the release
+    needs: [ubuntu, fedora]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            || gh release upload "${GITHUB_REF_NAME}" dist/* --clobber

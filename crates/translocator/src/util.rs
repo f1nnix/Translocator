@@ -101,6 +101,13 @@ fn natural_cmp_ignore_case(a: &str, b: &str) -> Ordering {
     }
 }
 
+/// What the system file manager is called, for menu labels.
+pub const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
+    "Reveal in Finder"
+} else {
+    "Show in File Manager"
+};
+
 /// Icon for an entry, chosen from the Lucide set by type and extension.
 pub fn entry_icon(entry: &Entry) -> IconName {
     if entry.is_dir() {

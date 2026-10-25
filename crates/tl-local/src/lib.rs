@@ -201,6 +201,8 @@ impl Vfs for LocalVfs {
     }
 
     fn trash(&self, paths: &[VPath], ctx: &OpCtx, progress: &Progress) -> VfsResult<()> {
+        // Only the macOS branch below mutates it.
+        #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
         let mut trash = trash::TrashContext::default();
         #[cfg(target_os = "macos")]
         {
