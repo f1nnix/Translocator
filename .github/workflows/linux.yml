@@ -44,8 +44,18 @@ jobs:
       - name: Build
         run: cargo build --locked --release -p translocator
 
+      # The same script developers use; its output names the endpoint and
+      # credentials the S3 tests look for. Without it they skip themselves,
+      # which is what happens in the Fedora job, where there is no Docker.
+      - name: Start MinIO for the S3 tests
+        run: scripts/s3-test-server.sh | sed 's/^export //' >> "$GITHUB_ENV"
+
       - name: Test
         run: cargo test --locked --workspace
+
+      - name: Stop MinIO
+        if: always()
+        run: scripts/s3-test-server.sh --stop
 
       - name: Build .deb
         run: |

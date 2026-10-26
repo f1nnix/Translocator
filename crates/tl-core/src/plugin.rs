@@ -17,6 +17,8 @@ pub enum FieldKind {
     Toggle,
     /// A path on this machine (e.g. an SSH identity file).
     LocalPath,
+    /// A password or key that must not be shown while typing.
+    Secret,
     /// One of fixed `(value, label)` options.
     Choice(Vec<(&'static str, &'static str)>),
 }

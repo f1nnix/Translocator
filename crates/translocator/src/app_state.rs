@@ -107,6 +107,7 @@ fn runtime_dir() -> PathBuf {
 pub fn init(cx: &mut App) {
     let mut registry = PluginRegistry::new();
     registry.register(Arc::new(tl_ssh::SshPlugin));
+    registry.register(Arc::new(tl_s3::S3Plugin));
     registry.register(Arc::new(tl_local::LocalPlugin));
 
     let bridge = bridge::start(cx);
@@ -157,6 +158,7 @@ pub fn init(cx: &mut App) {
 pub fn init_for_tests(cx: &mut App, dir: &std::path::Path, settings: Settings) {
     let mut registry = PluginRegistry::new();
     registry.register(Arc::new(tl_ssh::SshPlugin));
+    registry.register(Arc::new(tl_s3::S3Plugin));
     registry.register(Arc::new(tl_local::LocalPlugin));
     let bridge = bridge::start(cx);
     let env = PluginEnv {

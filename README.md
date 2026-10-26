@@ -4,10 +4,10 @@
 
 A classic dual-pane file manager for macOS and Linux, written in Rust on
 [gpui](https://gpui.rs) and [gpui-component](https://gpui-kit.com). Remote
-locations are plugins; the first one, **SSH**, does not use SFTP: it drives a
-plain shell on the server through your own OpenSSH client, so working with a
-server feels exactly like working in a terminal there — `cp`, `mv`, `chmod`,
-`sudo` and all.
+locations are plugins. **SSH** does not use SFTP: it drives a plain shell on
+the server through your own OpenSSH client, so working with a server feels
+exactly like working in a terminal there — `cp`, `mv`, `chmod`, `sudo` and
+all. **S3** reaches Amazon S3 and anything that speaks its API.
 
 ## Building
 
@@ -54,20 +54,23 @@ cargo generate-rpm -p crates/translocator   # → target/generate-rpm/*.rpm
 | `crates/tl-core` | Provider-neutral `Vfs` trait, plugin registry, bookmarks, askpass bridge, transfer engine, directory compare and sync, multi-rename, archives as folders |
 | `crates/tl-local` | Local file system (`std::fs`, APFS clones, Trash), archives via the `tar`, `flate2` and `zip` crates |
 | `crates/tl-ssh` | SSH plugin: ControlMaster, command protocol, sudo, listings, tar streams, archives with the server's `tar` / `unzip` / `zip` |
+| `crates/tl-s3` | S3 plugin: the AWS SDK behind the blocking `Vfs`, bucket list as the root, server-side copies, tar streaming both ways |
 | `crates/translocator` | The gpui application |
 
 ## How copies and moves are routed
 
 Every pane shows a location: a `Vfs` (file system) plus a directory. Each
 `Vfs` reports a *location key*; for SSH it is the effective
-`user@hostname:port` from `ssh -G` (plus the jump host, if any).
+`user@hostname:port` from `ssh -G` (plus the jump host, if any), and for S3
+the credentials, endpoint and region.
 
-* **Same key** (two folders on the same server, as the same user): the
-  provider does the work itself. On SSH that is one `cp -a` / `mv` running
-  on the server — no data passes through this Mac. The dialog says so before
-  you confirm.
-* **Different keys** (local ↔ server, server A ↔ server B): the source emits a
-  tar stream (`tar -cf -` on the server, or in-process locally), the engine
+* **Same key** (two folders on one server, or two buckets of one account):
+  the provider does the work itself. On SSH that is one `cp -a` / `mv` on
+  the server, on S3 a `CopyObject` — no data passes through this Mac. The
+  dialog says so before you confirm.
+* **Different keys** (local ↔ server, server A ↔ server B, anything ↔ S3):
+  the source emits a tar stream (`tar -cf -` on the server, built in memory
+  for S3, in-process locally), the engine
   rewrites it on the fly (renames, merge filters) and feeds the destination's
   unpacker (`tar -x` on the server). No temporary files; byte-exact progress.
   Server-to-server transfers stream through this Mac.
@@ -192,6 +195,40 @@ archive there, the extension picking the format.
 | ⌘J, ⌘⇧J | Jobs, console output |
 | ⌘⇧. | Show hidden files |
 
+## S3 and S3-compatible storage
+
+A bookmark is an **account**, not a single bucket: the root of the pane is
+the bucket list, so one connection reaches every bucket the credentials can
+see. Amazon S3 needs only a region; anything else (MinIO, Cloudflare R2,
+Backblaze B2, DigitalOcean Spaces) needs an endpoint, and path-style
+addressing then turns itself on.
+
+Credentials come from whichever you give it: an `~/.aws/credentials` profile
+(SSO and `credential_process` included, since this is Amazon's own SDK), the
+`AWS_*` environment variables, or an access key and secret typed into the
+bookmark. A key typed in is stored in `bookmarks.json`, which is `chmod 600`;
+the field is masked, with an eye button to check it once.
+
+What S3 is not changes a few things, and the app says so rather than
+pretending:
+
+* **Folders are key prefixes.** An empty one is held open by a zero-byte
+  object whose key ends in `/`, which is what `mkdir` creates and what the
+  pane hides again when it lists.
+* **Copying inside one account never leaves the service.** Two buckets reached
+  with the same credentials, endpoint and region share a location, so F5 and
+  F6 become `CopyObject` — including between different buckets. A move is that
+  copy followed by a delete, because S3 has no rename.
+* **To and from anywhere else it streams**, as a tar built and taken apart in
+  memory, the same path SSH uses. Files past 64 MB go up as a multipart
+  upload, so memory stays flat whatever the size.
+* **No permissions, links, trash or shell.** Objects are listed as `0644` and
+  folders as `0755` because a row of dashes reads as broken; chmod, chown and
+  symlinks are refused, F8 deletes for good, and the command line is off.
+* **Symbolic links cannot be stored**, so a copy that contains one fails and
+  names it instead of dropping it silently — which matters most for a move,
+  where the source would otherwise be deleted.
+
 ## Plugins
 
 A connection type implements `ProviderPlugin` (`crates/tl-core/src/plugin.rs`):
@@ -256,8 +293,11 @@ extracting, packing and adding to archives.
 
 ## Not yet
 
-An SFTP and an S3 plugin, Windows support, a mirror mode for sync
+An SFTP plugin, Windows support, a mirror mode for sync
 (deleting what the other side lacks), more archive formats (tar.bz2, tar.xz,
 7z), renaming inside archives, and archives inside archives. Extracting an
 archive into another folder on the same server streams through this Mac.
 Names containing newlines are listed correctly only on servers with GNU find.
+On S3 there are no server-side archives, so opening one downloads it, and
+object storage classes, versioning and server-side encryption are not
+exposed.

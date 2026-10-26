@@ -99,7 +99,13 @@ pub fn edit(
         } else {
             let value = current.unwrap_or_else(|| spec.default.to_string());
             let placeholder = spec.placeholder;
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder).default_value(value));
+            let secret = spec.kind == FieldKind::Secret;
+            let input = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(placeholder)
+                    .masked(secret)
+                    .default_value(value)
+            });
             inputs.insert((plugin.clone(), spec.key), input);
         }
     }
@@ -191,6 +197,11 @@ pub fn edit(
                         )
                         .into_any_element()
                 }
+                // A secret gets the eye button, so it can be checked once.
+                FieldKind::Secret => Input::new(&form.inputs[&key])
+                    .small()
+                    .mask_toggle()
+                    .into_any_element(),
                 _ => Input::new(&form.inputs[&key]).small().into_any_element(),
             };
             fields = fields.child(f.child(control));

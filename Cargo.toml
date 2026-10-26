@@ -11,6 +11,7 @@ license = "MIT"
 tl-core = { path = "crates/tl-core" }
 tl-local = { path = "crates/tl-local" }
 tl-ssh = { path = "crates/tl-ssh" }
+tl-s3 = { path = "crates/tl-s3" }
 
 gpui-kit = "0.7.3"
 anyhow = "1"

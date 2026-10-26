@@ -321,7 +321,7 @@ fn listing_and_basic_ops() {
         assert_eq!(mode(&data.join("sub")), 0o750);
         assert_eq!(mode(&data.join("outside.txt")), 0o644);
 
-        let totals = s.vfs.scan(&[dir.clone()], &ctx).unwrap();
+        let totals = s.vfs.scan(std::slice::from_ref(&dir), &ctx).unwrap();
         assert!(totals.files >= 4 && totals.dirs >= 2, "{totals:?}");
         let walked = s.vfs.walk(&dir, &ctx).unwrap();
         assert!(walked.iter().any(|w| w.rel == b"sub"));

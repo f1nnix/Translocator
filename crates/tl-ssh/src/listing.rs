@@ -320,10 +320,10 @@ mod tests {
 
     #[test]
     fn gnu_records() {
-        let out = b"d\0d\0755\04096\01697371234.5\00\00\0root\0root\0etc\0\0\
-l\0d\0777\07\01697371234.0\01000\01000\0me\0me\0link\0/etc\0\
-l\0N\0777\03\01697371234.0\01000\01000\0me\0me\0dead\0nowhere\0\
-f\0f\04755\0100\01\0 0\00\0root\0root\0we ird\nname\0\0";
+        let out = b"d\x00d\x00755\x004096\x001697371234.5\x000\x000\x00root\x00root\x00etc\x00\x00\
+l\x00d\x00777\x007\x001697371234.0\x001000\x001000\x00me\x00me\x00link\x00/etc\x00\
+l\x00N\x00777\x003\x001697371234.0\x001000\x001000\x00me\x00me\x00dead\x00nowhere\x00\
+f\x00f\x004755\x00100\x001\x00 0\x000\x00root\x00root\x00we ird\nname\x00\x00";
         let entries = parse_gnu(out);
         assert_eq!(entries.len(), 4);
         assert_eq!(entries[0].name, b"etc");

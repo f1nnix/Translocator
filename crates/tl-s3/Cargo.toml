@@ -1,0 +1,26 @@
+[package]
+name = "tl-s3"
+description = "Translocator provider for S3 and S3-compatible object stores"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+tl-core.workspace = true
+# The TLS backend is rustls over ring rather than the default aws-lc, which
+# would need cmake and a long C build on every CI machine. The HTTP client is
+# therefore built explicitly and handed to the SDK.
+aws-config = { version = "1", default-features = false, features = ["rt-tokio", "credentials-process", "sso"] }
+aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", "sigv4a", "http-1x", "behavior-version-latest"] }
+aws-smithy-http-client = { version = "1", default-features = false, features = ["rustls-ring"] }
+aws-credential-types = "1"
+aws-smithy-types = "1"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+log.workspace = true
+tar.workspace = true
+url = "2"
+
+[dev-dependencies]
+tempfile.workspace = true
+tl-local.workspace = true
