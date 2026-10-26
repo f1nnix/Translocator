@@ -20,6 +20,12 @@ env:
   CARGO_TERM_COLOR: always
   # Plain backtraces on a failing test, without the noise of full ones.
   RUST_BACKTRACE: 1
+  # A debug build of this workspace is 26 GB on a developer machine, and a
+  # runner has about 14 GB free. Debug info and incremental artifacts are
+  # nearly all of that, and CI needs neither.
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   ubuntu:
@@ -27,6 +33,15 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
+
+      # The image ships SDKs this project never uses, and gpui plus the AWS
+      # SDK need the room.
+      - name: Free disk space
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h / | tail -1
 
       - name: Install system dependencies
         run: sudo scripts/linux-deps.sh build
@@ -110,9 +125,10 @@ jobs:
       - name: Build
         run: cargo build --locked --release -p translocator
 
-      - name: Test
-        run: cargo test --locked --workspace
-
+      # The test suite runs in the Ubuntu job. Repeating it here would mean
+      # a second, debug-profile copy of the whole dependency tree, and this
+      # job runs in a container that cannot free the host's disk. What
+      # Fedora is here to prove is that it builds, packages and installs.
       - name: Build .rpm
         run: |
           cargo install cargo-generate-rpm --locked --version ^0.21
