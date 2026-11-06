@@ -355,3 +355,46 @@ fn archives_open_as_folders_extract_and_pack(cx: &mut TestAppContext) {
             .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("site.tar.gz"))
     });
 }
+
+/// A plugin that is written but never registered is invisible in the app,
+/// and nothing else would notice.
+#[gpui::test]
+fn every_provider_is_registered_and_its_fields_make_sense(cx: &mut TestAppContext) {
+    let f = open(cx, |_| {});
+    let _ = &f;
+    cx.update(|cx| {
+        let registry = &cx.global::<app_state::AppState>().registry;
+        let mut ids: Vec<&str> = registry.all().iter().map(|p| p.id()).collect();
+        ids.sort();
+        assert_eq!(ids, ["local", "s3", "ssh", "webdav"]);
+
+        for plugin in registry.all() {
+            let fields = plugin.fields();
+            assert!(!plugin.name().is_empty(), "{} has no name", plugin.id());
+            let mut keys: Vec<&str> = fields.iter().map(|f| f.key).collect();
+            keys.sort();
+            let unique = keys.len();
+            keys.dedup();
+            assert_eq!(keys.len(), unique, "{} repeats a field key", plugin.id());
+            // The bookmark editor shows whatever a plugin declares, so a
+            // field with no label is a blank row in the dialog.
+            assert!(
+                fields.iter().all(|f| !f.label.is_empty()),
+                "{} has a field with no label",
+                plugin.id()
+            );
+            // An empty bookmark is what the editor starts with. A plugin
+            // with no required field may well accept it — an S3 bookmark
+            // with nothing filled in means Amazon with the credentials
+            // already on this machine — but one that insists on a field
+            // has to say what is missing rather than try to connect.
+            if fields.iter().any(|f| f.required) {
+                assert!(
+                    plugin.validate(&Default::default()).is_err(),
+                    "{} accepts an empty bookmark although a field is required",
+                    plugin.id()
+                );
+            }
+        }
+    });
+}

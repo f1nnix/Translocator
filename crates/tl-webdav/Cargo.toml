@@ -1,0 +1,26 @@
+[package]
+name = "tl-webdav"
+description = "Translocator provider for WebDAV servers"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+tl-core.workspace = true
+base64.workspace = true
+chrono.workspace = true
+log.workspace = true
+quick-xml = "0.41"
+tar.workspace = true
+# Blocking HTTP, which is what the Vfs API wants. WebDAV needs PROPFIND,
+# MKCOL, COPY and MOVE, and most small clients only know the methods in
+# RFC 9110; this one sends whatever it is given. rustls over ring, because
+# the default aws-lc needs cmake and a long C build on every CI machine.
+reqwest = { version = "0.13", default-features = false, features = ["blocking", "rustls-no-provider", "system-proxy"] }
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+url = "2"
+
+[dev-dependencies]
+tempfile.workspace = true
+tl-local.workspace = true

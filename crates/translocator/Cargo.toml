@@ -15,6 +15,7 @@ tl-core.workspace = true
 tl-local.workspace = true
 tl-ssh.workspace = true
 tl-s3.workspace = true
+tl-webdav.workspace = true
 
 chrono.workspace = true
 dirs.workspace = true

@@ -7,7 +7,8 @@ A classic dual-pane file manager for macOS and Linux, written in Rust on
 locations are plugins. **SSH** does not use SFTP: it drives a plain shell on
 the server through your own OpenSSH client, so working with a server feels
 exactly like working in a terminal there — `cp`, `mv`, `chmod`, `sudo` and
-all. **S3** reaches Amazon S3 and anything that speaks its API.
+all. **S3** reaches Amazon S3 and anything that speaks its API, and
+**WebDAV** reaches Nextcloud, ownCloud, Apache `mod_dav` and the rest.
 
 ## Building
 
@@ -55,22 +56,23 @@ cargo generate-rpm -p crates/translocator   # → target/generate-rpm/*.rpm
 | `crates/tl-local` | Local file system (`std::fs`, APFS clones, Trash), archives via the `tar`, `flate2` and `zip` crates |
 | `crates/tl-ssh` | SSH plugin: ControlMaster, command protocol, sudo, listings, tar streams, archives with the server's `tar` / `unzip` / `zip` |
 | `crates/tl-s3` | S3 plugin: the AWS SDK behind the blocking `Vfs`, bucket list as the root, server-side copies, tar streaming both ways |
+| `crates/tl-webdav` | WebDAV plugin: PROPFIND listings, server-side `COPY` and `MOVE`, tar streaming both ways |
 | `crates/translocator` | The gpui application |
 
 ## How copies and moves are routed
 
 Every pane shows a location: a `Vfs` (file system) plus a directory. Each
 `Vfs` reports a *location key*; for SSH it is the effective
-`user@hostname:port` from `ssh -G` (plus the jump host, if any), and for S3
-the credentials, endpoint and region.
+`user@hostname:port` from `ssh -G` (plus the jump host, if any), for S3
+the credentials, endpoint and region, and for WebDAV the user and base URL.
 
 * **Same key** (two folders on one server, or two buckets of one account):
   the provider does the work itself. On SSH that is one `cp -a` / `mv` on
-  the server, on S3 a `CopyObject` — no data passes through this Mac. The
-  dialog says so before you confirm.
+  the server, on S3 a `CopyObject`, on WebDAV one `COPY` or `MOVE` request —
+  no data passes through this Mac. The dialog says so before you confirm.
 * **Different keys** (local ↔ server, server A ↔ server B, anything ↔ S3):
   the source emits a tar stream (`tar -cf -` on the server, built in memory
-  for S3, in-process locally), the engine
+  for S3 and WebDAV, in-process locally), the engine
   rewrites it on the fly (renames, merge filters) and feeds the destination's
   unpacker (`tar -x` on the server). No temporary files; byte-exact progress.
   Server-to-server transfers stream through this Mac.
@@ -229,14 +231,44 @@ pretending:
   names it instead of dropping it silently — which matters most for a move,
   where the source would otherwise be deleted.
 
+## WebDAV
+
+A bookmark is a server URL, a user and a password. Nextcloud and ownCloud
+put the files below a path of their own, so the URL is the whole thing:
+`https://cloud.example.com/remote.php/dav/files/<user>`. A bare host is
+assumed to be `https://`, credentials written into the URL are used and then
+dropped from it, and servers that take an OAuth token instead of a password
+have a bearer-token field. A self-signed certificate needs *Trust any
+certificate* turned on for that bookmark; otherwise the system's trust store
+decides, so a corporate CA you have installed already works.
+
+* **Copying inside one server never leaves it.** F5 and F6 become one `COPY`
+  or `MOVE` request with `Depth: infinity`, whatever the size of the tree, and
+  a rename is a `MOVE` that refuses to overwrite. A merge is the exception: it
+  needs a decision per file, so those go one request each — still on the
+  server.
+* **To and from anywhere else it streams**, as a tar built from `GET`s and
+  taken apart into `PUT`s. Files up to 8 MB go up from a buffer; past that
+  the body is streamed, so memory stays flat whatever the size.
+* **Listings are one request.** `PROPFIND` with `Depth: infinity` walks a
+  whole tree at once; Apache refuses that by default, and the connection
+  notices, says so in the log and walks folder by folder from then on.
+* **No permissions, links, trash or shell.** WebDAV carries none of them, so
+  entries are listed as `0644` and `0755`, chmod, chown and symlinks are
+  refused, F8 deletes for good, and the command line is off.
+* **Symbolic links cannot be stored**, so a copy that contains one fails and
+  names it instead of dropping it silently.
+* Free space comes from RFC 4331 (`quota-available-bytes`) when the server
+  answers it, and the pane simply leaves it out when it does not.
+
 ## Plugins
 
 A connection type implements `ProviderPlugin` (`crates/tl-core/src/plugin.rs`):
 it declares its bookmark fields (the bookmark editor renders them
 generically), validates them and turns a bookmark into a `Vfs`. Plugins are
 compiled in and registered in `crates/translocator/src/app_state.rs`. To add
-SFTP or S3, implement `Vfs` for it and register the plugin — copies to and
-from every other location work through tar streams automatically, and
+another — SFTP, say — implement `Vfs` for it and register the plugin: copies
+to and from every other location work through tar streams automatically, and
 same-location copies use whatever server-side operation the provider offers.
 
 ## Tests
@@ -244,6 +276,24 @@ same-location copies use whatever server-side operation the provider offers.
 ```bash
 cargo test --workspace
 ```
+
+The S3 and WebDAV plugins have end-to-end tests that need a server. Each
+has a script that starts a throwaway one in Docker and prints the
+environment the tests look for; without that environment they skip
+themselves, so the line above works on a machine with neither.
+
+```bash
+eval "$(scripts/s3-test-server.sh)"        # MinIO
+eval "$(scripts/webdav-test-server.sh)"    # rclone's WebDAV server
+cargo test -p tl-s3 -p tl-webdav
+scripts/s3-test-server.sh --stop
+scripts/webdav-test-server.sh --stop
+```
+
+CI runs both, so every push exercises real listings, server-side copies and
+moves, merges, streamed transfers in both directions and a file large enough
+to go up in several pieces. Any other WebDAV server works too:
+`TL_WEBDAV_TEST_URL`, `TL_WEBDAV_TEST_USER` and `TL_WEBDAV_TEST_PASSWORD`.
 
 The SSH plugin's end-to-end tests (`crates/tl-ssh/tests/fake_ssh.rs`) run every
 scenario against a fake `ssh` that executes commands locally, and a fake `sudo`
@@ -298,6 +348,8 @@ An SFTP plugin, Windows support, a mirror mode for sync
 7z), renaming inside archives, and archives inside archives. Extracting an
 archive into another folder on the same server streams through this Mac.
 Names containing newlines are listed correctly only on servers with GNU find.
-On S3 there are no server-side archives, so opening one downloads it, and
-object storage classes, versioning and server-side encryption are not
-exposed.
+On S3 and WebDAV there are no server-side archives, so opening one downloads
+it, and object storage classes, versioning and server-side encryption are not
+exposed. WebDAV locking and Digest authentication are not implemented, and a proxy
+comes from the system settings or `https_proxy`, not from a field on the
+bookmark.
