@@ -183,7 +183,9 @@ archive there, the extension picking the format.
 | Enter, ⌃PgDn | Open a tar, tar.gz or zip file as a folder |
 | ⌥F9 / ⌘⌥E | Extract the selected archives to the other pane |
 | ⌥F5 / ⌘⌥P | Pack the selection into an archive in the other pane |
-| ⌘K, ⌥F1 / ⌥F2 | Locations: this Mac, volumes, bookmarks |
+| ⌘K, ⌥F1 / ⌥F2 | Locations: saved folders, this Mac, volumes, bookmarks |
+| ⌘D | Save this folder on the row, or take it off again |
+| ⌘1 … ⌘9 | Go to the n-th saved folder of this host |
 | ⌘⇧G / ⌘L | Go to folder |
 | ⌘[ ⌘] | Back / forward |
 | ⌘T, ⌘W, ⌃Tab | New tab, close tab, next tab |
@@ -193,9 +195,36 @@ archive there, the extension picking the format.
 | ⌘⇧S | Toggle sudo for the pane |
 | ⌘E | Command line (runs in the pane's folder, on the server for SSH panes) |
 | ⌘⇧T | Open Terminal here (`ssh -t host 'cd …'` for SSH panes) |
-| ⌘B, ⌘D | Manage bookmarks, bookmark this folder |
+| ⌘B | Manage bookmarks |
 | ⌘J, ⌘⇧J | Jobs, console output |
 | ⌘⇧. | Show hidden files |
+
+## Saved folders
+
+Each connection carries its own row of folders, drawn under the location
+line and above the file list. ⌘D puts the folder a pane is in on that row
+and ⌘D again takes it off; a click or ⌘1 … ⌘9 jumps there, and the folder
+the pane is in is the one highlighted. Right-click a folder on the row to
+rename it, move it along or remove it.
+
+The row belongs to the **host**, not to the pane or the bookmark: it is
+keyed on the same location key that decides whether a copy runs on the
+server, so `deploy@web-1` keeps one row whichever bookmark opened it and
+whichever pane shows it, while this Mac keeps its own. Switching a pane to
+another connection switches the row with it, which is the point — two
+panes on two servers each show that server's folders. A pane inside an
+archive shows the row of the file system holding it, so a click there
+leaves the archive; ⌘D is off, because a path inside an archive means
+nothing to the host.
+
+Saved folders live in `bookmarks.json` next to the connection bookmarks. A
+folder whose name is not valid UTF-8 is stored as the bytes it really is,
+rather than a lossy spelling that would point somewhere else.
+
+A row needs the connection to be up, so it is not the way to *reach* a
+server's folder from cold — that is what a connection bookmark with a start
+folder is for, and **Connection ▸ New Bookmark for This Folder…** makes one
+from wherever a pane is.
 
 ## S3 and S3-compatible storage
 

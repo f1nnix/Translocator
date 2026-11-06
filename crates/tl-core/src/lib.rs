@@ -23,7 +23,7 @@ pub mod util;
 pub mod vfs;
 
 pub use archive::{ArchiveBackend, ArchiveFormat, ArchiveMember};
-pub use bookmark::{Bookmark, BookmarkConfig, BookmarkStore};
+pub use bookmark::{Bookmark, BookmarkConfig, BookmarkStore, Place};
 pub use cancel::{CancelGuard, CancelToken};
 pub use entry::{Entry, EntryKind};
 pub use error::{VfsError, VfsResult};

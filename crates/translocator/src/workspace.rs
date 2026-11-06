@@ -155,6 +155,13 @@ impl Workspace {
             PaneEvent::OpenBookmark(id) => self.open_bookmark(id.clone(), side, window, cx),
             PaneEvent::NewBookmark => bookmarks::edit(None, Some(side), cx.weak_entity(), window, cx),
             PaneEvent::ManageBookmarks => bookmarks::manage(cx.weak_entity(), side, window, cx),
+            PaneEvent::PlacesChanged => {
+                // Both panes may be on this host, and the row is drawn
+                // from the store rather than from the pane.
+                for pane in [&self.left, &self.right] {
+                    pane.update(cx, |_, cx| cx.notify());
+                }
+            }
             PaneEvent::Disconnect => {
                 let vfs = pane.read(cx).location().on_host().vfs;
                 self.disconnect(vfs, cx);
@@ -1601,9 +1608,12 @@ impl Workspace {
         self.disconnect(vfs, cx);
     }
 
-    fn add_bookmark(&mut self, _: &AddBookmark, window: &mut Window, cx: &mut Context<Self>) {
+    /// A connection bookmark that opens straight in this folder, which is
+    /// what reaches a server's folder from cold; a place on the row needs
+    /// the connection to be up already.
+    fn bookmark_connection(&mut self, _: &BookmarkConnection, window: &mut Window, cx: &mut Context<Self>) {
         let pane = self.active_pane().read(cx);
-        let loc = pane.location().clone();
+        let loc = pane.location().on_host();
         let state = cx.global::<AppState>();
         let template = if loc.is_local() {
             let mut b = tl_core::Bookmark::new(loc.path.file_name_lossy(), tl_local::PLUGIN_ID);
@@ -1613,7 +1623,7 @@ impl Workspace {
             match state.bookmark_of(&loc.vfs).and_then(|id| state.bookmarks.get(&id).cloned()) {
                 Some(origin) => {
                     let mut b = origin.clone();
-                    b.id = uuid_like();
+                    b.id = tl_core::Bookmark::new("", "").id;
                     b.name = format!("{} {}", origin.name, loc.path.file_name_lossy());
                     b.set("path", loc.path.display());
                     b
@@ -1968,7 +1978,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_hidden))
             .on_action(cx.listener(Self::toggle_sudo))
             .on_action(cx.listener(Self::disconnect_action))
-            .on_action(cx.listener(Self::add_bookmark))
+            .on_action(cx.listener(Self::bookmark_connection))
             .on_action(cx.listener(Self::manage_bookmarks))
             .on_action(cx.listener(Self::new_bookmark))
             .on_action(cx.listener(Self::focus_command_line))
@@ -2031,9 +2041,5 @@ fn sanitize(s: &str) -> String {
     s.chars()
         .map(|c| if c.is_alphanumeric() || "-_.@".contains(c) { c } else { '_' })
         .collect()
-}
-
-fn uuid_like() -> String {
-    tl_core::Bookmark::new("", "").id
 }
 

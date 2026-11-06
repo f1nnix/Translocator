@@ -71,7 +71,8 @@ actions!(
         // Connections and app.
         ToggleSudo,
         Disconnect,
-        AddBookmark,
+        TogglePlace,
+        BookmarkConnection,
         ManageBookmarks,
         NewBookmark,
         FocusCommandLine,
@@ -84,6 +85,13 @@ actions!(
         CloseEditor,
     ]
 );
+
+/// Jump to the n-th saved folder of the pane's host (⌘1…⌘9).
+#[derive(Clone, Debug, Default, PartialEq, Action)]
+#[action(namespace = tl, no_json)]
+pub struct GoToPlace {
+    pub index: usize,
+}
 
 /// Key context of a file pane.
 pub const PANE: &str = "FilePane";
@@ -135,6 +143,15 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-f1", LocationsLeft, w),
         KeyBinding::new("alt-f2", LocationsRight, w),
         KeyBinding::new("cmd-k", Locations, p),
+        KeyBinding::new("cmd-1", GoToPlace { index: 0 }, p),
+        KeyBinding::new("cmd-2", GoToPlace { index: 1 }, p),
+        KeyBinding::new("cmd-3", GoToPlace { index: 2 }, p),
+        KeyBinding::new("cmd-4", GoToPlace { index: 3 }, p),
+        KeyBinding::new("cmd-5", GoToPlace { index: 4 }, p),
+        KeyBinding::new("cmd-6", GoToPlace { index: 5 }, p),
+        KeyBinding::new("cmd-7", GoToPlace { index: 6 }, p),
+        KeyBinding::new("cmd-8", GoToPlace { index: 7 }, p),
+        KeyBinding::new("cmd-9", GoToPlace { index: 8 }, p),
         KeyBinding::new("f3", ViewFile, p),
         KeyBinding::new("f4", EditFile, p),
         KeyBinding::new("shift-f4", NewFile, p),
@@ -170,7 +187,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-x", ClipboardCut, p),
         KeyBinding::new("cmd-v", ClipboardPaste, p),
         KeyBinding::new("cmd-shift-s", ToggleSudo, p),
-        KeyBinding::new("cmd-d", AddBookmark, p),
+        KeyBinding::new("cmd-d", TogglePlace, p),
         KeyBinding::new("cmd-b", ManageBookmarks, w),
         KeyBinding::new("cmd-e", FocusCommandLine, w),
         KeyBinding::new("escape", FocusPane, Some("CommandLine")),
@@ -247,8 +264,10 @@ pub fn set_menus(cx: &mut App) {
             MenuItem::action("Console", ToggleConsole),
         ]),
         Menu::new("Connection").items([
+            MenuItem::action("Save This Folder", TogglePlace),
+            MenuItem::separator(),
             MenuItem::action("New Bookmark…", NewBookmark),
-            MenuItem::action("Bookmark This Folder", AddBookmark),
+            MenuItem::action("New Bookmark for This Folder…", BookmarkConnection),
             MenuItem::action("Manage Bookmarks…", ManageBookmarks),
             MenuItem::separator(),
             MenuItem::action("Toggle sudo", ToggleSudo),

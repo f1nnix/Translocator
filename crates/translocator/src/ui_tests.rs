@@ -164,6 +164,34 @@ impl Fixture {
         });
     }
 
+    /// The saved folders of the host a pane is on, as (name, path).
+    fn places(&self, cx: &mut TestAppContext, side: Side) -> Vec<(String, String)> {
+        let pane = self.pane(cx, side);
+        cx.update(|cx| {
+            let host = pane.read(cx).host_key();
+            cx.global::<app_state::AppState>()
+                .bookmarks
+                .places(&host)
+                .into_iter()
+                .map(|p| (p.name, p.path.display()))
+                .collect()
+        })
+    }
+
+    /// Where the file list starts, which says whether a row above it is
+    /// really being drawn.
+    fn list_top(&self, cx: &mut TestAppContext, side: Side) -> f32 {
+        self.draw(cx);
+        let pane = self.pane(cx, side);
+        cx.update(|cx| f32::from(pane.read(cx).list_origin.y))
+    }
+
+    /// Whether the pane draws the row at all.
+    fn has_places(&self, cx: &mut TestAppContext, side: Side) -> bool {
+        let pane = self.pane(cx, side);
+        cx.update(|cx| pane.read(cx).has_places(cx))
+    }
+
     fn files(&self, dir: &str) -> Vec<String> {
         let mut names: Vec<String> = fs::read_dir(self.root.join(dir))
             .unwrap()
@@ -397,4 +425,90 @@ fn every_provider_is_registered_and_its_fields_make_sense(cx: &mut TestAppContex
             }
         }
     });
+}
+
+/// The row of saved folders under the location line: one row per host, and
+/// switching connection switches the row.
+#[gpui::test]
+fn the_places_row_saves_and_switches_folders(cx: &mut TestAppContext) {
+    let f = open(cx, |root| {
+        for dir in ["left/logs", "left/config"] {
+            fs::create_dir_all(root.join(dir)).unwrap();
+        }
+    });
+    let left = f.root.join("left");
+    let enter = |f: &Fixture, cx: &mut TestAppContext, name: &str| {
+        f.select(cx, name);
+        f.dispatch(cx, Open);
+        let want = tl_core::VPath::from_local(&left.join(name));
+        f.settle(cx, "the pane to enter the folder", move |ws, cx| {
+            let pane = ws.pane(Side::Left).read(cx);
+            !pane.is_loading() && pane.location().path == want
+        });
+    };
+
+    // Nothing is saved yet, so there is no row to draw.
+    assert!(!f.has_places(cx, Side::Left));
+    let list_top = f.list_top(cx, Side::Left);
+
+    // ⌘D saves the folder the pane is in, named after it.
+    enter(&f, cx, "logs");
+    f.dispatch(cx, TogglePlace);
+    assert_eq!(
+        f.places(cx, Side::Left),
+        [("logs".into(), left.join("logs").display().to_string())]
+    );
+    assert!(f.has_places(cx, Side::Left));
+    // And the row really takes a strip of the pane, pushing the file list
+    // down by its own height.
+    f.settle(cx, "the row to appear", |_, _| true);
+    let with_row = f.list_top(cx, Side::Left);
+    assert!(
+        with_row - list_top > 18. && with_row - list_top < 32.,
+        "the file list moved by {} points, which is not one row",
+        with_row - list_top
+    );
+    // The other pane is on the same host, so its row has it too.
+    assert_eq!(f.places(cx, Side::Right).len(), 1);
+
+    f.dispatch(cx, GoParent);
+    enter(&f, cx, "config");
+    f.dispatch(cx, TogglePlace);
+    let names: Vec<String> = f.places(cx, Side::Left).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(names, ["logs", "config"], "saved folders keep their order");
+
+    // ⌘1 and ⌘2 switch between them from anywhere on the host.
+    f.dispatch(cx, GoParent);
+    f.settle(cx, "the pane to leave config", |ws, cx| {
+        !ws.pane(Side::Left).read(cx).is_loading()
+    });
+    f.dispatch(cx, GoToPlace { index: 0 });
+    f.settle(cx, "⌘1 to go to logs", |ws, cx| {
+        let pane = ws.pane(Side::Left).read(cx);
+        !pane.is_loading() && pane.location().path.file_name() == Some(b"logs")
+    });
+    f.dispatch(cx, GoToPlace { index: 1 });
+    f.settle(cx, "⌘2 to go to config", |ws, cx| {
+        let pane = ws.pane(Side::Left).read(cx);
+        !pane.is_loading() && pane.location().path.file_name() == Some(b"config")
+    });
+    // A number with nothing behind it does nothing at all.
+    f.dispatch(cx, GoToPlace { index: 7 });
+    f.settle(cx, "the pane to stay put", |ws, cx| {
+        let pane = ws.pane(Side::Left).read(cx);
+        !pane.is_loading() && pane.location().path.file_name() == Some(b"config")
+    });
+
+    // ⌘D again takes the folder off the row, and leaves the other one.
+    f.dispatch(cx, TogglePlace);
+    let names: Vec<String> = f.places(cx, Side::Left).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(names, ["logs"]);
+
+    // Another host's folders never show up here.
+    cx.update(|cx| {
+        let place = tl_core::Place::new("deploy@web-1:22", "etc", tl_core::VPath::parse("/etc"));
+        cx.global_mut::<app_state::AppState>().bookmarks.add_place(place).unwrap();
+    });
+    let names: Vec<String> = f.places(cx, Side::Left).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(names, ["logs"]);
 }

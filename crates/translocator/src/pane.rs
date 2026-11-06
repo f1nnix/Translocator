@@ -13,11 +13,12 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{prelude::*, *};
 use tl_core::archive::ArchiveFormat;
 use tl_core::util::{human_size, wildcard_match};
-use tl_core::{Entry, EntryKind, OpCtx, SpaceInfo, VPath, Vfs, VfsError};
+use tl_core::{Entry, EntryKind, OpCtx, Place, SpaceInfo, VPath, Vfs, VfsError};
 
 use crate::actions::*;
 use crate::app_state::AppState;
@@ -200,6 +201,8 @@ pub enum PaneEvent {
     PermissionDenied(VPath),
     OpenFile(Entry),
     OpenBookmark(String),
+    /// A folder was saved, renamed, moved or dropped: both rows redraw.
+    PlacesChanged,
     NewBookmark,
     ManageBookmarks,
     Disconnect,
@@ -293,7 +296,7 @@ pub struct FilePane {
     /// How many characters of path fit in the header.
     crumb_chars: usize,
     /// Top-left of the file list, where the keyboard locations menu opens.
-    list_origin: Point<Pixels>,
+    pub(crate) list_origin: Point<Pixels>,
     popup: Option<(Entity<PopupMenu>, Subscription)>,
     _subs: Vec<Subscription>,
 }
@@ -976,8 +979,10 @@ impl FilePane {
     /// The location menu as a keyboard-driven popup (⌘K, ⌥F1/⌥F2).
     pub fn open_locations(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let pane = cx.weak_entity();
-        let remote = !self.location().is_local();
-        let menu = PopupMenu::build(window, cx, move |menu, window, cx| location_menu(menu, pane.clone(), remote, window, cx));
+        let info = MenuInfo::of(self, cx);
+        let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
+            location_menu(menu, pane.clone(), info.clone(), window, cx)
+        });
         let handle = menu.focus_handle(cx);
         window.focus(&handle, cx);
         let sub = cx.subscribe_in(&menu, window, |this: &mut Self, _, _: &DismissEvent, window, cx| {
@@ -990,6 +995,98 @@ impl FilePane {
         });
         self.popup = Some((menu, sub));
         cx.notify();
+    }
+
+    // ----- places ---------------------------------------------------------
+
+    /// Which connection the row of saved folders belongs to. A pane inside
+    /// an archive shows the places of the file system holding it, so a
+    /// click there leaves the archive.
+    pub fn host_key(&self) -> String {
+        self.tab().loc.on_host().vfs.location_key().to_string()
+    }
+
+    /// Whether this host has any saved folder; with none, the row would be
+    /// an empty strip, so it is left out.
+    pub fn has_places(&self, cx: &App) -> bool {
+        !cx.global::<AppState>().bookmarks.places(&self.host_key()).is_empty()
+    }
+
+    /// The folder on that host, or `None` inside an archive, where a path
+    /// means nothing to the host.
+    fn host_path(&self) -> Option<VPath> {
+        let loc = &self.tab().loc;
+        loc.vfs.host().is_none().then(|| loc.path.clone())
+    }
+
+    /// ⌘D: saves this folder on the row, or takes it off again.
+    fn toggle_place(&mut self, _: &TogglePlace, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(path) = self.host_path() else {
+            cx.emit(PaneEvent::Error("A folder inside an archive cannot be saved.".into()));
+            return;
+        };
+        let host = self.host_key();
+        let state = cx.global_mut::<AppState>();
+        let saved = state.bookmarks.place_of(&host, &path).map(|p| p.id.clone());
+        let result = match saved {
+            Some(id) => state.bookmarks.remove_place(&id),
+            None => {
+                let name = if path.is_root() { "/".to_string() } else { path.file_name_lossy() };
+                state.bookmarks.add_place(Place::new(host, name, path))
+            }
+        };
+        self.after_places(result, cx);
+    }
+
+    /// ⌘1…⌘9: the n-th folder on this host's row.
+    fn go_to_place(&mut self, action: &GoToPlace, _: &mut Window, cx: &mut Context<Self>) {
+        let host = self.host_key();
+        let target = cx
+            .global::<AppState>()
+            .bookmarks
+            .place_at(&host, action.index)
+            .map(|p| p.path.clone());
+        if let Some(path) = target {
+            self.navigate(path, None, cx);
+        }
+    }
+
+    fn ask_place_name(&mut self, id: String, name: String, window: &mut Window, cx: &mut Context<Self>) {
+        let answer = dialogs::ask_input(window, cx, "Rename Place", "", name, None, "Rename");
+        cx.spawn(async move |this, cx| {
+            let Some(answer) = answer.await else { return };
+            let name = answer.trim().to_string();
+            if name.is_empty() {
+                return;
+            }
+            let _ = this.update(cx, |this, cx| {
+                let result = cx.global_mut::<AppState>().bookmarks.rename_place(&id, name);
+                this.after_places(result, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn remove_place(&mut self, id: &str, cx: &mut Context<Self>) {
+        let result = cx.global_mut::<AppState>().bookmarks.remove_place(id);
+        self.after_places(result, cx);
+    }
+
+    fn move_place(&mut self, id: &str, delta: isize, cx: &mut Context<Self>) {
+        let result = cx.global_mut::<AppState>().bookmarks.move_place(id, delta);
+        self.after_places(result, cx);
+    }
+
+    /// Both panes draw their row from the store, so a change on one side
+    /// has to reach the other.
+    fn after_places(&mut self, result: std::io::Result<()>, cx: &mut Context<Self>) {
+        match result {
+            Ok(()) => {
+                cx.emit(PaneEvent::PlacesChanged);
+                cx.notify();
+            }
+            Err(err) => cx.emit(PaneEvent::Error(format!("Cannot save the places: {err}").into())),
+        }
     }
 
     fn refresh(&mut self, _: &Refresh, _: &mut Window, cx: &mut Context<Self>) {
@@ -1323,6 +1420,7 @@ impl FilePane {
         let label: SharedString = if is_local { "Local".into() } else { host.vfs.label().into() };
         let elevated = tab.elevated;
         let pane = cx.weak_entity();
+        let info = MenuInfo::of(self, cx);
 
         // Breadcrumb; leading parts collapse into "…" when space runs out.
         let mut crumbs: Vec<(SharedString, VPath)> = Vec::new();
@@ -1388,7 +1486,7 @@ impl FilePane {
                     .compact()
                     .tab_stop(false)
                     .dropdown_caret(true)
-                    .dropdown_menu(move |menu, window, cx| location_menu(menu, pane.clone(), !is_local, window, cx)),
+                    .dropdown_menu(move |menu, window, cx| location_menu(menu, pane.clone(), info.clone(), window, cx)),
             )
             .child(
                 h_flex()
@@ -1413,6 +1511,125 @@ impl FilePane {
                         .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleSudo), cx)),
                 )
             })
+    }
+
+    /// The quick-switch row: the folders saved for whatever host this pane
+    /// is connected to, so switching connection switches the row.
+    fn render_places(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let theme = cx.theme().clone();
+        let host = self.host_key();
+        let here = self.host_path();
+        let places = cx.global::<AppState>().bookmarks.places(&host);
+        let last = places.len().saturating_sub(1);
+        let saved = here
+            .as_ref()
+            .is_some_and(|path| places.iter().any(|p| &p.path == path));
+        let pane = cx.weak_entity();
+
+        let chips = places.into_iter().enumerate().map(|(ix, place)| {
+            let active = here.as_ref() == Some(&place.path);
+            let full = place.path.display();
+            // The row can hold two folders of the same name, so the path is
+            // what tells them apart.
+            let tip: SharedString = match ix < 9 {
+                true => format!("{full}  ⌘{}", ix + 1).into(),
+                false => full.into(),
+            };
+            let (go, id) = (place.path.clone(), place.id.clone());
+            let (menu_pane, name) = (pane.clone(), place.name.clone());
+            div()
+                .id(("place", ix))
+                .flex_shrink_0()
+                .px(px(6.))
+                .rounded_sm()
+                .cursor_pointer()
+                .when(active, |d| d.bg(theme.list_active).text_color(theme.foreground))
+                .when(!active, |d| {
+                    d.text_color(theme.muted_foreground).hover(|s| s.bg(theme.list_hover))
+                })
+                .child(SharedString::from(place.name))
+                .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
+                    this.navigate(go.clone(), None, cx);
+                }))
+                .context_menu(move |menu, _window, _cx| {
+                    let (p1, p2, p3, p4) = (
+                        menu_pane.clone(),
+                        menu_pane.clone(),
+                        menu_pane.clone(),
+                        menu_pane.clone(),
+                    );
+                    let (i1, i2, i3, i4) = (id.clone(), id.clone(), id.clone(), id.clone());
+                    let name = name.clone();
+                    menu.min_w(px(180.))
+                        .item(PopupMenuItem::new("Rename…").icon(Lucide::PenLine).on_click(
+                            move |_, window, cx| {
+                                let (id, name) = (i1.clone(), name.clone());
+                                let _ = p1.update(cx, |this, cx| this.ask_place_name(id, name, window, cx));
+                            },
+                        ))
+                        .item(
+                            PopupMenuItem::new("Move Left")
+                                .icon(Lucide::ChevronLeft)
+                                .disabled(ix == 0)
+                                .on_click(move |_, _, cx| {
+                                    let id = i2.clone();
+                                    let _ = p2.update(cx, |this, cx| this.move_place(&id, -1, cx));
+                                }),
+                        )
+                        .item(
+                            PopupMenuItem::new("Move Right")
+                                .icon(Lucide::ChevronRight)
+                                .disabled(ix == last)
+                                .on_click(move |_, _, cx| {
+                                    let id = i3.clone();
+                                    let _ = p3.update(cx, |this, cx| this.move_place(&id, 1, cx));
+                                }),
+                        )
+                        .separator()
+                        .item(PopupMenuItem::new("Remove").icon(Lucide::BookmarkX).on_click(
+                            move |_, _, cx| {
+                                let id = i4.clone();
+                                let _ = p4.update(cx, |this, cx| this.remove_place(&id, cx));
+                            },
+                        ))
+                })
+        });
+
+        h_flex()
+            .h(px(24.))
+            .flex_shrink_0()
+            .px_1()
+            .gap(px(3.))
+            .border_b_1()
+            .border_color(theme.border)
+            .text_size(px(12.))
+            .child(Icon::new(Lucide::Bookmark).xsmall().text_color(theme.muted_foreground))
+            .child(
+                h_flex()
+                    .id(("places", self.side as usize))
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(3.))
+                    // More folders than fit scroll sideways; ⌘1…⌘9 and the
+                    // location popup reach the ones past the edge.
+                    .overflow_x_scroll()
+                    .children(chips),
+            )
+            .child(
+                Button::new("toggle-place")
+                    .icon(if saved { Lucide::BookmarkMinus } else { Lucide::BookmarkPlus })
+                    .ghost()
+                    .xsmall()
+                    .tab_stop(false)
+                    .disabled(here.is_none())
+                    .tooltip(if saved {
+                        "Take this folder off the row (⌘D)"
+                    } else {
+                        "Save this folder on the row (⌘D)"
+                    })
+                    .on_click(|_, window, cx| window.dispatch_action(Box::new(TogglePlace), cx)),
+            )
     }
 
     fn render_columns(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1520,19 +1737,67 @@ impl FilePane {
     }
 }
 
-/// The location dropdown: this Mac, bookmarks, connection commands.
-/// `remote` is passed in rather than read from the pane: the keyboard
-/// popup builds this menu while the pane is being updated.
+/// What the location popup needs to know about the pane. Read before the
+/// menu is built, because the keyboard popup builds it while the pane is
+/// being updated.
+#[derive(Clone)]
+pub struct MenuInfo {
+    remote: bool,
+    /// Inside an archive, where a saved folder means nothing.
+    in_archive: bool,
+    /// Whether this folder is already on the row.
+    saved: bool,
+    /// The saved folders of the host this pane is on.
+    places: Vec<Place>,
+}
+
+impl MenuInfo {
+    fn of(pane: &FilePane, cx: &App) -> Self {
+        let loc = &pane.tab().loc;
+        let here = pane.host_path();
+        let places = cx.global::<AppState>().bookmarks.places(&pane.host_key());
+        MenuInfo {
+            remote: !loc.is_local(),
+            in_archive: loc.vfs.host().is_some(),
+            saved: here.as_ref().is_some_and(|p| places.iter().any(|place| &place.path == p)),
+            places,
+        }
+    }
+}
+
+/// The location dropdown: this host's saved folders, this Mac, bookmarks,
+/// connection commands.
 fn location_menu(
     menu: PopupMenu,
     pane: WeakEntity<FilePane>,
-    remote: bool,
+    info: MenuInfo,
     _window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     let local = tl_local::local_vfs();
     let home = local.home();
-    let mut menu = menu.min_w(px(240.)).label("This Mac");
+    let mut menu = menu.min_w(px(240.));
+
+    // This host's own folders first: on a server, the items below are
+    // somewhere else entirely.
+    if !info.places.is_empty() {
+        menu = menu.label("Places");
+        for (ix, place) in info.places.iter().enumerate() {
+            menu = menu.menu_with_icon(
+                place.name.clone(),
+                Lucide::Folder,
+                Box::new(GoToPlace { index: ix }),
+            );
+        }
+    }
+    menu = menu
+        .menu_with_disabled(
+            if info.saved { "Remove This Folder" } else { "Save This Folder" },
+            Box::new(TogglePlace),
+            info.in_archive,
+        )
+        .separator()
+        .label("This Mac");
     let mut places: Vec<(SharedString, Lucide, VPath)> = vec![("Home".into(), Lucide::House, home.clone())];
     for (name, icon) in [("Desktop", Lucide::Monitor), ("Documents", Lucide::FileText), ("Downloads", Lucide::Download)] {
         let path = home.child(name.as_bytes());
@@ -1582,10 +1847,15 @@ fn location_menu(
         .item(PopupMenuItem::new("New Bookmark…").icon(Lucide::BookmarkPlus).on_click(move |_, _, cx| {
             let _ = p1.update(cx, |_, cx| cx.emit(PaneEvent::NewBookmark));
         }))
+        .menu_with_disabled(
+            "New Bookmark for This Folder…",
+            Box::new(BookmarkConnection),
+            info.in_archive,
+        )
         .item(PopupMenuItem::new("Manage Bookmarks…").icon(Lucide::Bookmark).on_click(move |_, _, cx| {
             let _ = p2.update(cx, |_, cx| cx.emit(PaneEvent::ManageBookmarks));
         }));
-    if remote {
+    if info.remote {
         menu = menu.separator().item(PopupMenuItem::new("Disconnect").icon(Lucide::Unplug).on_click(move |_, _, cx| {
             let _ = p3.update(cx, |_, cx| cx.emit(PaneEvent::Disconnect));
         }));
@@ -1802,6 +2072,8 @@ impl Render for FilePane {
             .on_action(cx.listener(Self::go_to_path))
             .on_action(cx.listener(Self::refresh))
             .on_action(cx.listener(Self::locations))
+            .on_action(cx.listener(Self::toggle_place))
+            .on_action(cx.listener(Self::go_to_place))
             .on_action(cx.listener(Self::new_tab))
             .on_action(cx.listener(Self::close_tab))
             .on_action(cx.listener(Self::next_tab))
@@ -1809,6 +2081,7 @@ impl Render for FilePane {
             .on_key_down(cx.listener(Self::on_key))
             .child(self.render_header(focused, cx))
             .when(self.tabs.len() > 1, |el| el.child(self.render_tabs(cx)))
+            .when(self.has_places(cx), |el| el.child(self.render_places(cx)))
             .child(self.render_columns(cx))
             .child(list)
             .child(self.render_status(cx))
