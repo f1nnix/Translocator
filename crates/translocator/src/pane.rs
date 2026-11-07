@@ -218,6 +218,9 @@ pub struct TabState {
     /// Mark anchor for shift-click ranges.
     anchor: usize,
     marked: HashSet<Vec<u8>>,
+    /// Only the entries whose name matches this are listed; empty lists
+    /// everything. One per tab, so each tab keeps its own.
+    filter: String,
     sort: Sort,
     pub elevated: bool,
     loading: bool,
@@ -241,6 +244,7 @@ impl TabState {
             cursor: 0,
             anchor: 0,
             marked: HashSet::new(),
+            filter: String::new(),
             sort: Sort {
                 key: SortKey::Name,
                 desc: false,
@@ -290,7 +294,6 @@ pub struct FilePane {
     pub focus: FocusHandle,
     tabs: Vec<TabState>,
     active: usize,
-    quick: String,
     show_hidden: bool,
     narrow: u8,
     /// How many characters of path fit in the header.
@@ -309,7 +312,21 @@ impl Focusable for FilePane {
     }
 }
 
-fn build_rows(raw: &[Entry], sort: Sort, show_hidden: bool, at_root: bool) -> Vec<Row> {
+/// Whether a name passes the pane's filter.
+///
+/// The whole name is matched, extension included, so `log` finds both
+/// `logrotate.conf` and `app.log`. A query holding `*` or `?` is a
+/// wildcard instead, matching the name end to end, so `*.log` finds only
+/// the second — and `;` separates several, as the mark masks do.
+pub(crate) fn matches_filter(name: &str, query: &str) -> bool {
+    if query.contains('*') || query.contains('?') {
+        return wildcard_match(query, name);
+    }
+    name.to_lowercase().contains(&query.to_lowercase())
+}
+
+fn build_rows(raw: &[Entry], sort: Sort, show_hidden: bool, at_root: bool, filter: &str) -> Vec<Row> {
+    let query = filter.trim();
     let mut rows: Vec<Row> = raw
         .iter()
         .filter(|e| show_hidden || !e.is_hidden())
@@ -318,6 +335,7 @@ fn build_rows(raw: &[Entry], sort: Sort, show_hidden: bool, at_root: bool) -> Ve
             name: e.name_lossy().into(),
             parent: false,
         })
+        .filter(|r| query.is_empty() || matches_filter(&r.name, query))
         .collect();
     rows.sort_by(|a, b| {
         let (ad, bd) = (a.entry.is_dir(), b.entry.is_dir());
@@ -368,7 +386,6 @@ impl FilePane {
             focus,
             tabs: vec![TabState::new(loc, elevated)],
             active: 0,
-            quick: String::new(),
             show_hidden,
             narrow: 0,
             crumb_chars: 60,
@@ -473,8 +490,11 @@ impl FilePane {
         let keep = select
             .map(<[u8]>::to_vec)
             .or_else(|| tab.rows.get(tab.cursor).map(|r| r.entry.name.clone()));
-        tab.rows = build_rows(&tab.raw, tab.sort, show_hidden, tab.loc.path.is_root());
-        let names: HashSet<&[u8]> = tab.rows.iter().map(|r| r.entry.name.as_slice()).collect();
+        tab.rows = build_rows(&tab.raw, tab.sort, show_hidden, tab.loc.path.is_root(), &tab.filter);
+        // Against the whole listing rather than the visible rows: a mark
+        // has to survive the filter being narrowed and widened again, and
+        // only a file that has actually gone should lose it.
+        let names: HashSet<&[u8]> = tab.raw.iter().map(|e| e.name.as_slice()).collect();
         tab.marked.retain(|n| names.contains(n.as_slice()));
         tab.cursor = keep
             .and_then(|name| tab.rows.iter().position(|r| r.entry.name == name))
@@ -518,7 +538,7 @@ impl FilePane {
                     Err(err) => {
                         tab.error = Some(err.to_string().into());
                         tab.raw.clear();
-                        tab.rows = build_rows(&[], tab.sort, true, tab.loc.path.is_root());
+                        tab.rows = build_rows(&[], tab.sort, true, tab.loc.path.is_root(), "");
                         tab.cursor = 0;
                         match err {
                             VfsError::PermissionDenied(_) if tab.loc.vfs.capabilities().elevation && !tab.elevated => {
@@ -606,7 +626,7 @@ impl FilePane {
             self.enter(Location { vfs: host, path }, select, cx);
             return;
         }
-        self.quick.clear();
+        self.tab_mut().filter.clear();
         let tab = self.tab_mut();
         if tab.loc.path != path {
             let old = tab.loc.clone();
@@ -629,7 +649,7 @@ impl FilePane {
     /// Moves the active tab into or out of an archive, keeping its history
     /// and sudo state.
     fn enter(&mut self, loc: Location, select: Option<Vec<u8>>, cx: &mut Context<Self>) {
-        self.quick.clear();
+        self.tab_mut().filter.clear();
         let tab = self.tab_mut();
         let old = std::mem::replace(&mut tab.loc, loc);
         tab.back.push(old);
@@ -670,7 +690,7 @@ impl FilePane {
 
     /// Switches the active tab to another file system.
     pub fn open_location(&mut self, loc: Location, elevated: bool, cx: &mut Context<Self>) {
-        self.quick.clear();
+        self.tab_mut().filter.clear();
         let tab = self.tab_mut();
         let same_fs = Arc::ptr_eq(&tab.loc.vfs, &loc.vfs);
         if same_fs {
@@ -722,7 +742,6 @@ impl FilePane {
     }
 
     fn move_cursor(&mut self, to: usize, cx: &mut Context<Self>) {
-        self.quick.clear();
         let tab = self.tab_mut();
         if tab.rows.is_empty() {
             return;
@@ -857,7 +876,6 @@ impl FilePane {
     // ----- navigation -----------------------------------------------------
 
     fn open(&mut self, _: &Open, _: &mut Window, cx: &mut Context<Self>) {
-        self.quick.clear();
         let Some(row) = self.cursor_row().cloned() else { return };
         if row.parent {
             self.go_up(cx);
@@ -899,12 +917,18 @@ impl FilePane {
     }
 
     fn go_parent(&mut self, _: &GoParent, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.quick.is_empty() {
-            self.quick.pop();
-            cx.notify();
+        self.go_up(cx);
+    }
+
+    /// Backspace: one character off the filter, or up a folder when there
+    /// is no filter to shorten.
+    fn filter_backspace(&mut self, _: &FilterBackspace, _: &mut Window, cx: &mut Context<Self>) {
+        let mut query = self.tab().filter.clone();
+        if query.pop().is_none() {
+            self.go_up(cx);
             return;
         }
-        self.go_up(cx);
+        self.set_filter(query, cx);
     }
 
     fn go_back(&mut self, _: &GoBack, _: &mut Window, cx: &mut Context<Self>) {
@@ -1126,7 +1150,6 @@ impl FilePane {
     fn select_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
         if ix < self.tabs.len() {
             self.active = ix;
-            self.quick.clear();
             cx.emit(PaneEvent::LocationChanged);
             cx.notify();
         }
@@ -1142,16 +1165,45 @@ impl FilePane {
         self.select_tab(ix, cx);
     }
 
-    // ----- type-ahead -----------------------------------------------------
+    // ----- filter ---------------------------------------------------------
+
+    #[cfg(test)]
+    pub fn filter(&self) -> &str {
+        &self.tab().filter
+    }
+
+    /// Narrows or widens the list, keeping the cursor on the file it was
+    /// on for as long as that file still matches.
+    fn set_filter(&mut self, query: String, cx: &mut Context<Self>) {
+        let ix = self.active;
+        let keep = self.cursor_row().filter(|r| !r.parent).map(|r| r.entry.name.clone());
+        self.tabs[ix].filter = query;
+        self.rebuild_rows(ix, keep.as_deref());
+        let tab = &mut self.tabs[ix];
+        let kept = keep.is_some_and(|name| tab.rows.get(tab.cursor).is_some_and(|r| r.entry.name == name));
+        if !kept {
+            // The file under the cursor no longer matches, and the old
+            // index now points at whatever happens to sit there.
+            tab.cursor = tab.rows.iter().position(|r| !r.parent).unwrap_or(0);
+            tab.anchor = tab.cursor;
+            tab.scroll.scroll_to_item(tab.cursor, ScrollStrategy::Nearest);
+        }
+        cx.notify();
+    }
+
+    fn clear_filter(&mut self, cx: &mut Context<Self>) {
+        if !self.tab().filter.is_empty() {
+            self.set_filter(String::new(), cx);
+        }
+    }
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
         let mods = ks.modifiers;
         if ks.key == "escape" {
-            if !self.quick.is_empty() {
-                self.quick.clear();
+            if !self.tab().filter.is_empty() {
+                self.clear_filter(cx);
                 cx.stop_propagation();
-                cx.notify();
             }
             return;
         }
@@ -1162,7 +1214,11 @@ impl FilePane {
         if ch.is_empty() || ch.chars().any(char::is_control) {
             return;
         }
-        if self.quick.is_empty() {
+        if self.tab().filter.is_empty() {
+            // The classic mask keys, which a filter already being typed
+            // turns back into ordinary characters. `*` is not among them:
+            // `*.log` is how anyone filters by extension, and inverting
+            // the marks has ⌘⌥A and the Selection menu.
             match ch {
                 "+" => {
                     self.ask_mask(true, window, cx);
@@ -1174,35 +1230,17 @@ impl FilePane {
                     cx.stop_propagation();
                     return;
                 }
-                "*" => {
-                    self.invert(cx);
-                    cx.stop_propagation();
-                    return;
-                }
                 _ => {}
             }
         }
-        let query = format!("{}{}", self.quick, ch).to_lowercase();
-        let tab = self.tab();
-        let found = tab
-            .rows
-            .iter()
-            .position(|r| !r.parent && r.name.to_lowercase().starts_with(&query));
-        if let Some(ix) = found {
-            self.quick.push_str(ch);
-            let tab = self.tab_mut();
-            tab.cursor = ix;
-            tab.anchor = ix;
-            tab.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
-        }
+        let query = format!("{}{ch}", self.tab().filter);
+        self.set_filter(query, cx);
         cx.stop_propagation();
-        cx.notify();
     }
 
     // ----- mouse ----------------------------------------------------------
 
     fn click_row(&mut self, ix: usize, ev: &MouseDownEvent, cx: &mut Context<Self>) {
-        self.quick.clear();
         let mods = ev.modifiers;
         let tab = self.tab_mut();
         if ix >= tab.rows.len() {
@@ -1904,7 +1942,12 @@ impl Render for FilePane {
         let error = tab.error.clone();
         let disconnected = !tab.loc.vfs.is_connected();
         let side = self.side;
-        let quick = self.quick.clone();
+        let filter: SharedString = self.tab().filter.clone().into();
+        // What the filter is hiding, so the count is the reason the list
+        // looks short.
+        let shown = tab.rows.iter().filter(|r| !r.parent).count();
+        let total = tab.raw.iter().filter(|e| self.show_hidden || !e.is_hidden()).count();
+        let counts: SharedString = format!("{shown} of {total}").into();
         let drag_names: Rc<Vec<Vec<u8>>> = Rc::new(
             tab.rows
                 .iter()
@@ -2008,7 +2051,28 @@ impl Render for FilePane {
                         ),
                 )
             })
-            .when(!quick.is_empty(), |el| {
+            .when(!filter.is_empty() && shown == 0, |el| {
+                el.child(
+                    v_flex()
+                        .absolute()
+                        .top(px(40.))
+                        .left_0()
+                        .right_0()
+                        .items_center()
+                        .gap_1()
+                        .px_4()
+                        .child(Icon::new(IconName::Search).text_color(theme.muted_foreground))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_center()
+                                .text_color(theme.muted_foreground)
+                                .child(format!("Nothing here matches “{filter}”")),
+                        )
+                        .child(div().text_xs().text_color(theme.muted_foreground).child("Esc shows everything again")),
+                )
+            })
+            .when(!filter.is_empty(), |el| {
                 el.child(
                     h_flex()
                         .absolute()
@@ -2020,11 +2084,12 @@ impl Render for FilePane {
                         .rounded_md()
                         .bg(theme.popover)
                         .border_1()
-                        .border_color(theme.primary)
+                        .border_color(accent(&theme))
                         .shadow_md()
                         .text_size(px(12.))
                         .child(Icon::new(IconName::Search).xsmall().text_color(theme.muted_foreground))
-                        .child(quick),
+                        .child(filter)
+                        .child(div().text_color(theme.muted_foreground).child(counts)),
                 )
             })
             .drag_over::<DraggedFiles>(move |style, drag, _, cx| {
@@ -2100,6 +2165,7 @@ impl Render for FilePane {
             .on_action(cx.listener(Self::open))
             .on_action(cx.listener(Self::open_archive_action))
             .on_action(cx.listener(Self::go_parent))
+            .on_action(cx.listener(Self::filter_backspace))
             .on_action(cx.listener(Self::go_back))
             .on_action(cx.listener(Self::go_forward))
             .on_action(cx.listener(Self::go_home))

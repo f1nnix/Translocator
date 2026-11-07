@@ -172,10 +172,13 @@ onto a server, since the other pane can be one.
 |---|---|
 | ↑ ↓ PgUp PgDn Home End | Move cursor |
 | Space / Insert, ⇧↑ ⇧↓ | Mark / unmark |
-| ⌘A, ⌘⇧A, ⌘⌥A, `+`, `-`, `*` | Mark all, unmark all, invert, mark/unmark by mask, invert |
-| Enter, ⌫ | Open, enclosing folder |
+| ⌘A, ⌘⇧A, ⌘⌥A | Mark all (what the filter shows), unmark all, invert marks |
+| `+`, `-` | Mark / unmark by mask |
+| Enter | Open |
 | Tab | Switch pane |
-| Type letters | Jump to name (type-ahead) |
+| Type letters | Filter the list to the names that match |
+| ⌫ | One character off the filter, or the enclosing folder |
+| Esc | Clear the filter |
 | F2 / ⇧F6 | Rename |
 | F3 / F4 / ⇧F4 | View / edit / new file (built-in editor) |
 | F5 / F6 | Copy / move to the other pane |
@@ -208,6 +211,34 @@ onto a server, since the other pane can be one.
 | ⌘B | Manage bookmarks |
 | ⌘J, ⌘⇧J | Jobs, console output |
 | ⌘⇧. | Show hidden files |
+
+## Filtering a pane
+
+Typing in a pane filters its list to the names that match, as you type.
+⌫ takes one character off, Esc clears the filter and shows everything
+again, and a badge in the corner keeps the query in view with a count of
+what it is hiding (`3 of 128`). Each tab holds its own filter, and
+stepping into a folder starts afresh.
+
+The **whole name is matched, extension included**, so `log` finds
+`app.log` and `logrotate.conf` alike, and `.log` narrows it to the
+extension. A query holding `*` or `?` is a wildcard matched end to end
+instead — `*.log` leaves only the log files — and `;` separates several,
+as the mark masks do. Folders are filtered along with the files; `..`
+stays, so you can always leave.
+
+A filter is a view, not a selection: marking works as usual inside it and
+⌘A marks exactly what is showing, so **filter, ⌘A, F5** copies just the
+matches. An operation acts on what is marked *and* visible, so a filter
+can never make something happen to a file you cannot see — and a mark
+survives the filter being narrowed and widened again, because it belongs
+to the file rather than to the view. Compress, move, delete and the rest
+all follow the same rule.
+
+Typing takes `*` as the start of a wildcard rather than the classic
+"invert marks"; that is on ⌘⌥A and in the Selection menu. `+` and `-`
+still open the mark-by-mask dialogs when no filter is being typed, though
+a wildcard filter and ⌘A do the same job.
 
 ## Saved folders
 

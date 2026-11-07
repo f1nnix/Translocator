@@ -684,3 +684,100 @@ fn the_active_pane_stands_out_in_both_themes(cx: &mut TestAppContext) {
     // Leave the theme as the rest of the suite expects it.
     cx.update(|cx| Theme::change(ThemeMode::Light, None, cx));
 }
+
+/// Typing narrows the list to what matches, and the marks and operations
+/// work on what is left.
+#[gpui::test]
+fn typing_filters_the_list(cx: &mut TestAppContext) {
+    let f = open(cx, |root| {
+        write(&root.join("left/app.log"), "a", 1);
+        write(&root.join("left/db.log"), "b", 1);
+        write(&root.join("left/notes.txt"), "c", 1);
+        write(&root.join("left/logrotate.conf"), "d", 1);
+        fs::create_dir_all(root.join("left/logs")).unwrap();
+        fs::create_dir_all(root.join("left/images")).unwrap();
+    });
+    let filter = |cx: &mut TestAppContext| {
+        let pane = f.pane(cx, Side::Left);
+        cx.update(|cx| pane.read(cx).filter().to_string())
+    };
+
+    f.focus(cx, Side::Left);
+    assert_eq!(
+        f.names(cx, Side::Left, false),
+        ["app.log", "db.log", "images", "logrotate.conf", "logs", "notes.txt"]
+    );
+
+    // The whole name is matched, extension included, and folders are in
+    // it too.
+    f.type_text(cx, "log");
+    assert_eq!(filter(cx), "log");
+    assert_eq!(
+        f.names(cx, Side::Left, false),
+        ["app.log", "db.log", "logrotate.conf", "logs"]
+    );
+
+    // A wildcard matches the name end to end, so only the extension is
+    // left — which a plain substring cannot express.
+    f.type_text(cx, "s");
+    assert_eq!(f.names(cx, Side::Left, false), ["logs"]);
+    f.keys(cx, "backspace");
+    assert_eq!(filter(cx), "log");
+    f.type_text(cx, "*.log");
+    assert_eq!(filter(cx), "log*.log");
+    f.keys(cx, "backspace backspace backspace backspace backspace backspace backspace backspace");
+    assert_eq!(filter(cx), "", "eight characters, eight backspaces");
+    f.type_text(cx, "*.log");
+    assert_eq!(f.names(cx, Side::Left, false), ["app.log", "db.log"]);
+
+    // Escape puts everything back.
+    f.keys(cx, "escape");
+    assert_eq!(filter(cx), "");
+    assert_eq!(f.names(cx, Side::Left, false).len(), 6);
+
+    // With no filter to shorten, backspace is still "go to the enclosing
+    // folder".
+    f.keys(cx, "backspace");
+    f.settle(cx, "the pane to go up", |ws, cx| {
+        let pane = ws.pane(Side::Left).read(cx);
+        !pane.is_loading() && pane.location().path.file_name() != Some(b"left")
+    });
+}
+
+/// A filter is a view, so marking inside one and acting on it has to do
+/// what it looks like it does.
+#[gpui::test]
+fn marks_and_operations_follow_the_filter(cx: &mut TestAppContext) {
+    let f = open(cx, |root| {
+        write(&root.join("left/app.log"), "a", 1);
+        write(&root.join("left/db.log"), "b", 1);
+        write(&root.join("left/notes.txt"), "c", 1);
+    });
+
+    f.focus(cx, Side::Left);
+    f.type_text(cx, "*.log");
+    assert_eq!(f.names(cx, Side::Left, false), ["app.log", "db.log"]);
+
+    // Mark All takes the rows that are showing, not the whole folder.
+    f.dispatch(cx, MarkAll);
+    assert_eq!(f.names(cx, Side::Left, true), ["app.log", "db.log"]);
+
+    // A mark survives the filter being narrowed and widened again: it
+    // belongs to the file, not to the view.
+    f.type_text(cx, "x");
+    assert_eq!(f.names(cx, Side::Left, false), Vec::<String>::new());
+    f.keys(cx, "backspace");
+    assert_eq!(f.names(cx, Side::Left, true), ["app.log", "db.log"]);
+
+    // F5 copies what is marked and showing, and leaves the rest behind.
+    f.dispatch(cx, CopyFiles);
+    f.keys(cx, "enter");
+    let root = f.root.clone();
+    f.settle(cx, "the copy", move |_, _| root.join("right/db.log").exists());
+    assert_eq!(f.files("right"), ["app.log", "db.log"]);
+
+    // And the filter is still on, with the marks still in it.
+    let pane = f.pane(cx, Side::Left);
+    assert_eq!(cx.update(|cx| pane.read(cx).filter().to_string()), "*.log");
+    assert_eq!(f.names(cx, Side::Left, true), ["app.log", "db.log"]);
+}
