@@ -106,6 +106,13 @@ impl Workspace {
         }
     }
 
+    /// Which pane an action acts on. The tests read it to check that
+    /// focusing a pane really hands it the keyboard commands.
+    #[cfg(test)]
+    pub(crate) fn active_side(&self) -> Side {
+        self.active
+    }
+
     fn active_pane(&self) -> &Entity<FilePane> {
         self.pane(self.active)
     }
@@ -1322,26 +1329,51 @@ impl Workspace {
 
     /// Unpacks the selected archives into a folder of the other pane.
     fn extract_archive(&mut self, _: &ExtractArchive, window: &mut Window, cx: &mut Context<Self>) {
+        self.extract_into(false, window, cx);
+    }
+
+    /// Unpacks them beside themselves instead, into a folder of this pane.
+    fn decompress(&mut self, _: &Decompress, window: &mut Window, cx: &mut Context<Self>) {
+        self.extract_into(true, window, cx);
+    }
+
+    fn extract_into(&mut self, here: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(sel) = self.active_pane().read(cx).selection() else { return };
         let archives: Vec<Entry> = sel.entries.iter().filter(|e| FilePane::is_archive(e)).cloned().collect();
         if archives.is_empty() || sel.vfs.host().is_some() {
             self.notify_error("Select one or more .zip, .tar or .tar.gz files to extract.", window, cx);
             return;
         }
-        let dst = self.other_pane().read(cx);
+        let dst = if here { self.active_pane().read(cx) } else { self.other_pane().read(cx) };
         let (dst_loc, dst_elevated) = (dst.location().clone(), dst.elevated());
         let what = match archives.as_slice() {
             [one] => format!("“{}”", one.name_lossy()),
             many => format!("{} archives", many.len()),
         };
-        let target = if dst_loc.path.is_root() { "/".to_string() } else { format!("{}/", dst_loc.path) };
+        let dir = if dst_loc.path.is_root() { "/".to_string() } else { format!("{}/", dst_loc.path) };
+        // Unpacking beside the archive would otherwise strew its contents
+        // over the folder it is in, so a single archive gets a folder of
+        // its own, named after it, as the proposal.
+        let (target, select) = match (here, archives.as_slice()) {
+            (true, [one]) => {
+                let stem = tl_core::entry::split_extension(&one.name).0;
+                let stem = String::from_utf8_lossy(stem);
+                let stem = stem.strip_suffix(".tar").unwrap_or(&stem).to_string();
+                let range = dir.len()..dir.len() + stem.len();
+                (format!("{dir}{stem}"), range)
+            }
+            _ => {
+                let end = dir.len();
+                (dir, end..end)
+            }
+        };
         let place = dst_loc.on_host();
         let message = format!(
             "Extract {what} into this folder on {} (created if missing):",
             if place.is_local() { "this Mac".to_string() } else { place.vfs.label() }
         );
-        let end = target.len();
-        let answer = dialogs::ask_input(window, cx, "Extract", message, target, Some(end..end), "Extract");
+        let title = if here { "Decompress" } else { "Extract" };
+        let answer = dialogs::ask_input(window, cx, title, message, target, Some(select), title);
         cx.spawn_in(window, async move |this, cx| {
             let Some(text) = answer.await.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) else { return };
             let dst_vfs = dst_loc.vfs.clone();
@@ -1394,11 +1426,25 @@ impl Workspace {
     /// Packs the selection into an archive in the other pane's folder;
     /// an existing archive of that name gets the files added.
     fn pack_files(&mut self, _: &PackFiles, window: &mut Window, cx: &mut Context<Self>) {
+        self.pack_into(false, window, cx);
+    }
+
+    /// Packs it into an archive in this pane's own folder instead.
+    fn compress(&mut self, _: &Compress, window: &mut Window, cx: &mut Context<Self>) {
+        self.pack_into(true, window, cx);
+    }
+
+    fn pack_into(&mut self, here: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(sel) = self.active_pane().read(cx).selection() else { return };
-        let dst = self.other_pane().read(cx);
+        let dst = if here { self.active_pane().read(cx) } else { self.other_pane().read(cx) };
         let (dst_loc, dst_elevated) = (dst.location().clone(), dst.elevated());
         if dst_loc.vfs.host().is_some() {
-            self.notify_error("The other pane is inside an archive. Copy (F5) adds files to it.", window, cx);
+            let message = if here {
+                "This pane is inside an archive. Copy (F5) adds files to it."
+            } else {
+                "The other pane is inside an archive. Copy (F5) adds files to it."
+            };
+            self.notify_error(message, window, cx);
             return;
         }
         let stem = match sel.entries.as_slice() {
@@ -1415,7 +1461,8 @@ impl Workspace {
             sel.describe(),
             if place.is_local() { "this Mac".to_string() } else { place.vfs.label() }
         );
-        let answer = dialogs::ask_input(window, cx, "Pack", message, initial, Some(select), "Pack");
+        let title = if here { "Compress" } else { "Pack" };
+        let answer = dialogs::ask_input(window, cx, title, message, initial, Some(select), title);
         cx.spawn_in(window, async move |this, cx| {
             let Some(text) = answer.await.map(|t| t.trim().to_string()).filter(|t| !t.is_empty()) else { return };
             let dst_vfs = dst_loc.vfs.clone();
@@ -1966,6 +2013,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::multi_rename))
             .on_action(cx.listener(Self::extract_archive))
             .on_action(cx.listener(Self::pack_files))
+            .on_action(cx.listener(Self::compress))
+            .on_action(cx.listener(Self::decompress))
             .on_action(cx.listener(Self::locations_left))
             .on_action(cx.listener(Self::locations_right))
             .on_action(cx.listener(Self::clipboard_copy))

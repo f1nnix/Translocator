@@ -14,7 +14,7 @@ use gpui_kit::component::menu::{ContextMenuExt as _, DropdownMenu as _, PopupMen
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Theme, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{prelude::*, *};
 use tl_core::archive::ArchiveFormat;
 use tl_core::util::{human_size, wildcard_match};
@@ -1258,7 +1258,8 @@ impl FilePane {
         } else {
             theme.muted_foreground
         };
-        let fg = if marked { theme.primary } else { theme.foreground };
+        let accent = accent(&theme);
+        let fg = if marked { marked_fg(&theme) } else { theme.foreground };
         let muted = theme.muted_foreground;
 
         let ext: SharedString = if is_dir || row.parent {
@@ -1283,15 +1284,7 @@ impl FilePane {
             .as_ref()
             .map(|t| format!("→ {}", String::from_utf8_lossy(t)).into());
 
-        let bg = if is_cursor && focused {
-            Some(theme.list_active)
-        } else if is_cursor {
-            Some(theme.muted)
-        } else if marked {
-            Some(theme.primary.opacity(0.08))
-        } else {
-            None
-        };
+        let bg = row_bg(&theme, is_cursor, focused, marked);
         let narrow = self.narrow;
         let side = self.side;
         let names = if marked && !drag_names.is_empty() {
@@ -1316,7 +1309,10 @@ impl FilePane {
             .text_size(px(FONT))
             .text_color(fg)
             .when_some(bg, |el, bg| el.bg(bg))
-            .when(is_cursor && focused, |el| el.border_l_2().border_color(theme.primary))
+            // Always the same 2px, so the row does not shift sideways as
+            // the cursor arrives.
+            .border_l_2()
+            .border_color(if is_cursor && focused { accent } else { accent.opacity(0.) })
             .when(hidden, |el| el.opacity(0.6))
             .child(Icon::new(icon).size(px(15.)).flex_shrink_0().text_color(icon_color))
             .child(
@@ -1470,7 +1466,10 @@ impl FilePane {
             .px_1()
             .gap_1()
             .border_b_1()
-            .border_color(if focused { theme.primary.opacity(0.6) } else { theme.border })
+            // The active pane carries a tinted location line, so which one
+            // it is does not depend on a cursor row being in view.
+            .when(focused, |el| el.bg(accent(&theme).opacity(0.10)))
+            .border_color(if focused { accent(&theme) } else { theme.border })
             .child(
                 Button::new("location")
                     .icon(if in_archive {
@@ -1543,7 +1542,7 @@ impl FilePane {
                 .px(px(6.))
                 .rounded_sm()
                 .cursor_pointer()
-                .when(active, |d| d.bg(theme.list_active).text_color(theme.foreground))
+                .when(active, |d| d.bg(accent(&theme).opacity(0.22)).text_color(theme.foreground))
                 .when(!active, |d| {
                     d.text_color(theme.muted_foreground).hover(|s| s.bg(theme.list_hover))
                 })
@@ -1735,6 +1734,39 @@ impl FilePane {
             }))
             .on_click(cx.listener(|this, ix: &usize, _, cx| this.select_tab(*ix, cx)))
     }
+}
+
+/// What marks out the active pane.
+///
+/// Not `theme.primary`, which is what this used to use and cannot do the
+/// job: it is a near-black in the light theme and a near-white in the dark
+/// one, so it comes out the same colour as ordinary text and both panes
+/// looked alike. The blue and the amber below are the theme's own accents
+/// and read as accents in either.
+pub(crate) fn accent(theme: &Theme) -> Hsla {
+    theme.blue
+}
+
+/// The background of one row.
+///
+/// One pane out of the two is the active one, and the cursor is what says
+/// which: a solid band of colour in that pane, a whisper of grey in the
+/// other.
+pub(crate) fn row_bg(theme: &Theme, is_cursor: bool, focused: bool, marked: bool) -> Option<Hsla> {
+    if is_cursor && focused {
+        Some(accent(theme).opacity(0.42))
+    } else if is_cursor {
+        Some(theme.muted)
+    } else if marked {
+        Some(marked_fg(theme).opacity(0.14))
+    } else {
+        None
+    }
+}
+
+/// Marked rows, which an operation acts on, in the theme's amber.
+pub(crate) fn marked_fg(theme: &Theme) -> Hsla {
+    theme.warning
 }
 
 /// What the location popup needs to know about the pane. Read before the
@@ -2022,9 +2054,11 @@ impl Render for FilePane {
                     .separator()
                     .when(on_archive, |m| {
                         m.menu("Open Archive", Box::new(OpenArchive))
+                            .menu("Decompress…", Box::new(Decompress))
                             .menu("Extract to Other Pane…", Box::new(ExtractArchive))
                     })
-                    .menu_with_disabled("Pack into Archive…", Box::new(PackFiles), selection_count == 0)
+                    .menu_with_disabled("Compress…", Box::new(Compress), selection_count == 0)
+                    .menu_with_disabled("Pack into Archive in Other Pane…", Box::new(PackFiles), selection_count == 0)
                     .separator()
                     .menu("Copy", Box::new(ClipboardCopy))
                     .menu("Cut", Box::new(ClipboardCut))

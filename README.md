@@ -116,9 +116,17 @@ that keeps some files back leaves exactly those files in the source.
 tar, tar.gz / tgz and zip files open like folders (Enter or ⌃PgDn), and `..`
 at the archive's root leads back out. Copying out of an archive extracts,
 copying into one adds (replacing members of the same name); F7, ⇧F4, F8 and
-the editor work inside archives too. ⌥F9 unpacks the selected archives into a
-folder of the other pane; ⌥F5 packs the selection into a new or existing
-archive there, the extension picking the format.
+the editor work inside archives too.
+
+**Compress** (⇧⌥F5) packs whatever is selected — a file, a folder, or a
+marked set of folders — into one archive **in the folder the pane is in**,
+and **Decompress** (⇧⌥F9) unpacks the selected archives into a folder of
+that same pane, proposing one named after the archive so its contents are
+not strewn over the folder it sits in. The extension picks the format:
+`.tar.gz`, `.tgz`, `.tar` or `.zip`, and an existing archive of that name
+gets the files added to it. ⌥F5 and ⌥F9 do the same thing into the **other**
+pane, which is the classic two-pane way round — and the way to pack straight
+onto a server, since the other pane can be one.
 
 * **On this Mac** archives are read and written in-process. A change writes a
   new archive next to the old one and renames it into place.
@@ -181,8 +189,10 @@ archive there, the extension picking the format.
 | ⌘⌥S | Synchronize directories |
 | ⌃M / ⌘⇧M | Multi-rename the marked files |
 | Enter, ⌃PgDn | Open a tar, tar.gz or zip file as a folder |
-| ⌥F9 / ⌘⌥E | Extract the selected archives to the other pane |
+| ⇧⌥F5 / ⌘⌥⇧P | Compress the selection into an archive in this folder |
+| ⇧⌥F9 / ⌘⌥⇧E | Decompress the selected archives into this folder |
 | ⌥F5 / ⌘⌥P | Pack the selection into an archive in the other pane |
+| ⌥F9 / ⌘⌥E | Extract the selected archives to the other pane |
 | ⌘K, ⌥F1 / ⌥F2 | Locations: saved folders, this Mac, volumes, bookmarks |
 | ⌘D | Save this folder on the row, or take it off again |
 | ⌘1 … ⌘9 | Go to the n-th saved folder of this host |

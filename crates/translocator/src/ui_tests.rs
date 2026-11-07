@@ -63,6 +63,11 @@ fn open(cx: &mut TestAppContext, build: impl FnOnce(&Path)) -> Fixture {
         };
         gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Workspace::new(window, cx))).expect("test window")
     });
+    // gpui reports an empty focus path while a window is inactive, and a
+    // pane learns it is the active one from a focus event, so without this
+    // every test would run with the left pane active whatever it focused.
+    cx.update_window(window, |_, window, _| window.activate_window()).unwrap();
+    cx.run_until_parked();
     let fixture = Fixture {
         _tmp: tmp,
         root,
@@ -130,6 +135,9 @@ impl Fixture {
         })
         .unwrap();
         cx.run_until_parked();
+        // The workspace learns which pane is active from a focus event,
+        // which gpui dispatches at the end of the next frame.
+        self.settle(cx, "the pane to become the active one", move |ws, _| ws.active_side() == side);
     }
 
     fn pane(&self, cx: &mut TestAppContext, side: Side) -> Entity<FilePane> {
@@ -511,4 +519,168 @@ fn the_places_row_saves_and_switches_folders(cx: &mut TestAppContext) {
     });
     let names: Vec<String> = f.places(cx, Side::Left).into_iter().map(|(n, _)| n).collect();
     assert_eq!(names, ["logs"]);
+}
+
+/// A marked set of folders, packed and unpacked again.
+#[gpui::test]
+fn packs_and_extracts_a_set_of_folders(cx: &mut TestAppContext) {
+    let f = open(cx, |root| {
+        write(&root.join("left/one/a.txt"), "a", 1);
+        write(&root.join("left/one/deep/b.txt"), "b", 1);
+        write(&root.join("left/two/c.txt"), "c", 1);
+        write(&root.join("left/loose.txt"), "loose", 1);
+    });
+
+    // Mark both folders, leaving the file alone.
+    f.focus(cx, Side::Left);
+    f.dispatch(cx, MarkByMask);
+    f.type_text(cx, "one;two");
+    f.keys(cx, "enter");
+    assert_eq!(f.names(cx, Side::Left, true), ["one", "two"]);
+
+    // ⌥F5 packs them into one archive in the other pane.
+    f.dispatch(cx, PackFiles);
+    f.keys(cx, "enter");
+    let archive = f.root.join("right/left.tar.gz");
+    let path = archive.clone();
+    f.settle(cx, "packing the folders", move |_, _| {
+        std::process::Command::new("tar")
+            .arg("-tzf")
+            .arg(&path)
+            .output()
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("two/c.txt"))
+    });
+    let listing = String::from_utf8_lossy(
+        &std::process::Command::new("tar").arg("-tzf").arg(&archive).output().unwrap().stdout,
+    )
+    .into_owned();
+    for member in ["one/a.txt", "one/deep/b.txt", "two/c.txt"] {
+        assert!(listing.contains(member), "{member} is missing from {listing}");
+    }
+    assert!(!listing.contains("loose.txt"), "only the marked folders go in: {listing}");
+
+    // ⌥F9 from the other side unpacks the whole thing back.
+    f.focus(cx, Side::Right);
+    let right = f.pane(cx, Side::Right);
+    cx.update(|cx| right.update(cx, |p, cx| p.reload_select(b"left.tar.gz".to_vec(), cx)));
+    f.settle(cx, "the cursor on the archive", |ws, cx| {
+        let pane = ws.pane(Side::Right).read(cx);
+        !pane.is_loading() && pane.cursor_row().is_some_and(|r| r.name.as_ref() == "left.tar.gz")
+    });
+    f.dispatch(cx, ExtractArchive);
+    f.type_text(cx, "back");
+    f.keys(cx, "enter");
+    let root = f.root.clone();
+    f.settle(cx, "unpacking the folders", move |_, _| {
+        root.join("left/back/one/deep/b.txt").exists() && root.join("left/back/two/c.txt").exists()
+    });
+    assert_eq!(read(f.root.join("left/back/one/deep/b.txt")), "b");
+}
+
+/// Compress and decompress act on the pane they are in, not on the other
+/// one.
+#[gpui::test]
+fn compresses_and_decompresses_in_the_same_folder(cx: &mut TestAppContext) {
+    let f = open(cx, |root| {
+        write(&root.join("left/one/a.txt"), "a", 1);
+        write(&root.join("left/two/deep/b.txt"), "b", 1);
+    });
+
+    // Mark both folders and compress them where they are.
+    f.focus(cx, Side::Left);
+    f.dispatch(cx, MarkByMask);
+    f.type_text(cx, "one;two");
+    f.keys(cx, "enter");
+    assert_eq!(f.names(cx, Side::Left, true), ["one", "two"]);
+    f.dispatch(cx, Compress);
+    f.keys(cx, "enter");
+    let archive = f.root.join("left/left.tar.gz");
+    let path = archive.clone();
+    f.settle(cx, "compressing in place", move |_, _| {
+        std::process::Command::new("tar")
+            .arg("-tzf")
+            .arg(&path)
+            .output()
+            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("two/deep/b.txt"))
+    });
+    assert_eq!(
+        f.files("right"),
+        Vec::<String>::new(),
+        "the archive belongs beside the folders, not in the other pane"
+    );
+
+    // Decompress proposes a folder named after the archive, so its contents
+    // are not strewn over the folder it sits in. Enter accepts that.
+    f.select(cx, "left.tar.gz");
+    f.dispatch(cx, Decompress);
+    f.keys(cx, "enter");
+    let root = f.root.clone();
+    f.settle(cx, "decompressing in place", move |_, _| {
+        root.join("left/left/one/a.txt").exists() && root.join("left/left/two/deep/b.txt").exists()
+    });
+    assert_eq!(read(f.root.join("left/left/two/deep/b.txt")), "b");
+    assert_eq!(f.files("right"), Vec::<String>::new());
+}
+
+/// Which pane is the active one has to be obvious at a glance, in either
+/// theme. This holds the colours to a measurable gap, because the bug it
+/// replaces was exactly a pair of highlights that looked the same.
+#[gpui::test]
+fn the_active_pane_stands_out_in_both_themes(cx: &mut TestAppContext) {
+    use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
+    use gpui_kit::Hsla;
+
+    /// Lightness and colourfulness of `top` drawn over `under`.
+    fn over(top: Hsla, under: Hsla) -> (f32, f32) {
+        let l = under.l * (1. - top.a) + top.l * top.a;
+        let s = under.s * (1. - top.a) + top.s * top.a;
+        (l, s)
+    }
+
+    let _f = open(cx, |_| {});
+    for mode in [ThemeMode::Light, ThemeMode::Dark] {
+        cx.update(|cx| {
+            Theme::change(mode, None, cx);
+            let theme = cx.theme().clone();
+            let page = theme.background;
+            let cursor_here = crate::pane::row_bg(&theme, true, true, false).unwrap();
+            let cursor_there = crate::pane::row_bg(&theme, true, false, false).unwrap();
+            let (lit, sat) = over(cursor_here, page);
+            let (dim, dim_sat) = over(cursor_there, page);
+
+            assert!(
+                (lit - dim).abs() > 0.1,
+                "{mode:?}: the two cursors are {lit:.3} and {dim:.3} light, which is not a difference anyone can see"
+            );
+            assert!(
+                sat - dim_sat > 0.3,
+                "{mode:?}: the active cursor has to carry colour, not just lightness ({sat:.3} against {dim_sat:.3})"
+            );
+            // And it must stay a background: the row's text sits on it.
+            let (text_gap, _) = over(theme.foreground, page);
+            assert!(
+                (lit - text_gap).abs() > 0.4,
+                "{mode:?}: text at {text_gap:.3} on a band at {lit:.3} is unreadable"
+            );
+
+            // Marked rows are what an operation acts on, so they cannot be
+            // the same colour as everything else.
+            let marked = crate::pane::marked_fg(&theme);
+            assert!(
+                (marked.l - theme.foreground.l).abs() > 0.2 || marked.s > 0.5,
+                "{mode:?}: marked text at l={:.3} s={:.3} against plain text at l={:.3}",
+                marked.l,
+                marked.s,
+                theme.foreground.l
+            );
+            let band = crate::pane::row_bg(&theme, false, false, true).unwrap();
+            let (mark_l, mark_s) = over(band, page);
+            assert!(
+                mark_s > 0.1 && (mark_l - dim).abs() > 0.0,
+                "{mode:?}: a marked row needs a tint of its own (l={mark_l:.3} s={mark_s:.3})"
+            );
+        });
+    }
+    // Leave the theme as the rest of the suite expects it.
+    cx.update(|cx| Theme::change(ThemeMode::Light, None, cx));
 }
