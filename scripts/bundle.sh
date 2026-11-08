@@ -46,6 +46,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
   <key>CFBundleDisplayName</key><string>Translocator</string>
   <key>CFBundleExecutable</key><string>translocator</string>
   <key>CFBundleIconFile</key><string>Translocator</string>
+  <key>NSLocalNetworkUsageDescription</key><string>Translocator connects to servers on your local network over SSH.</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>CFBundleVersion</key><string>1</string>
@@ -55,6 +56,13 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </dict>
 </plist>
 PLIST
+
+# The linker signs the binary ad hoc with an identifier taken from its own
+# bytes, so every rebuild is a different application to macOS and starts again
+# with no privacy grants -- Local Network among them, without which connecting
+# to a LAN server fails with "No route to host". Signing the finished bundle
+# gives it one identifier and binds Info.plist to the signature.
+codesign --force --sign - --identifier dev.translocator.Translocator "$app" 2>/dev/null
 
 # Finder caches an app's icon by bundle mtime; bump it so a rebuilt bundle
 # does not keep showing the old (or missing) one.
