@@ -21,6 +21,8 @@ chrono.workspace = true
 dirs.workspace = true
 env_logger.workspace = true
 futures = "0.3"
+# Only to decode the embedded window icon; gpui already pulls this in.
+image = { version = "0.25", default-features = false, features = ["png"] }
 libc.workspace = true
 log.workspace = true
 notify.workspace = true
@@ -82,6 +84,7 @@ assets = [
     ["target/release/translocator", "usr/bin/", "755"],
     ["../../packaging/translocator.desktop", "usr/share/applications/", "644"],
     ["../../packaging/translocator.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["../../packaging/translocator-256.png", "usr/share/icons/hicolor/256x256/apps/translocator.png", "644"],
     ["../../README.md", "usr/share/doc/translocator/README.md", "644"],
 ]
 
@@ -91,6 +94,7 @@ assets = [
     { source = "target/release/translocator", dest = "/usr/bin/translocator", mode = "755" },
     { source = "packaging/translocator.desktop", dest = "/usr/share/applications/translocator.desktop", mode = "644" },
     { source = "packaging/translocator.svg", dest = "/usr/share/icons/hicolor/scalable/apps/translocator.svg", mode = "644" },
+    { source = "packaging/translocator-256.png", dest = "/usr/share/icons/hicolor/256x256/apps/translocator.png", mode = "644" },
     { source = "LICENSE", dest = "/usr/share/licenses/translocator/LICENSE", mode = "644", doc = true },
     { source = "README.md", dest = "/usr/share/doc/translocator/README.md", mode = "644", doc = true },
 ]
