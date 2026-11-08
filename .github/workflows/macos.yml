@@ -1,0 +1,202 @@
+name: macOS
+
+# A build for this machine signs itself ad hoc. Shipping one to anybody else
+# needs an Apple Developer ID and a trip through Apple's notary service, which
+# is what the signing steps below do. They read five repository secrets
+# (Settings -> Secrets and variables -> Actions) and skip themselves when
+# those are missing, so pull requests and forks still build:
+#
+#   MACOS_CERTIFICATE           base64 of the "Developer ID Application"
+#                               certificate, exported from Keychain Access as
+#                               a .p12:  base64 -i certificate.p12 | pbcopy
+#   MACOS_CERTIFICATE_PASSWORD  the password given to that export
+#   MACOS_NOTARY_KEY            base64 of an App Store Connect API key (.p8,
+#                               role Developer; Apple lets you download it
+#                               once)
+#   MACOS_NOTARY_KEY_ID         that key's Key ID, ten characters
+#   MACOS_NOTARY_ISSUER_ID      the Issuer ID, a UUID shown above the key list
+#
+# All five come out of an Apple Developer Program membership. Without the
+# certificate macOS still runs the app, but only after the user clears
+# Gatekeeper by hand.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+jobs:
+  app:
+    name: macOS 15 · app
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update
+          rustup default stable
+          rustc --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-15
+
+      # The S3, WebDAV and SSH suites talk to containers that only the Linux
+      # job starts; without their variables in the environment they skip.
+      - name: Test
+        run: cargo test --locked --workspace
+
+      - name: Check the tag against the crate version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match version $version in Cargo.toml" >&2
+            exit 1
+          fi
+
+      - name: Look for the signing secrets
+        id: signing
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+        run: |
+          if [ -n "$CERTIFICATE" ]; then sign=yes; else sign=no; fi
+          if [ -n "$NOTARY_KEY" ]; then notarize=yes; else notarize=no; fi
+          echo "sign=$sign" >> "$GITHUB_OUTPUT"
+          echo "notarize=$notarize" >> "$GITHUB_OUTPUT"
+          echo "signing: $sign · notarizing: $notarize"
+
+      - name: Load the Developer ID certificate
+        if: steps.signing.outputs.sign == 'yes'
+        env:
+          CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          # Nothing outlives the runner, so the keychain's own password is
+          # made up here rather than kept as a secret.
+          password=$(uuidgen)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+
+          echo "$CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" \
+            -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign -f pkcs12
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          # Otherwise codesign raises a dialog no one is there to answer.
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" login.keychain-db
+
+          identity=$(security find-identity -v -p codesigning "$keychain" \
+            | awk '/Developer ID Application/ { print $2; exit }')
+          if [ -z "$identity" ]; then
+            echo "no Developer ID Application identity in that certificate:" >&2
+            security find-identity -v -p codesigning "$keychain" >&2
+            exit 1
+          fi
+          echo "MACOS_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
+      # Both architectures for a release; a check of main or a pull request
+      # only needs this runner's own, and macOS minutes are not free.
+      - name: Build the app
+        env:
+          RELEASING: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          if [ "$RELEASING" = true ]; then
+            scripts/bundle.sh --release --universal
+          else
+            scripts/bundle.sh --release
+          fi
+          lipo -archs target/release/Translocator.app/Contents/MacOS/translocator
+          codesign -dv --verbose=2 target/release/Translocator.app
+
+      - name: Pack a .dmg
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          staging="$RUNNER_TEMP/dmg"
+          rm -rf "$staging"
+          mkdir -p "$staging" dist
+          cp -R target/release/Translocator.app "$staging/"
+          # The drag-to-install window everyone expects.
+          ln -s /Applications "$staging/Applications"
+          dmg="dist/Translocator-$version.dmg"
+          hdiutil create -volname Translocator -srcfolder "$staging" \
+            -fs HFS+ -format UDZO -ov "$dmg"
+          echo "DMG=$dmg" >> "$GITHUB_ENV"
+
+      - name: Sign the .dmg
+        if: steps.signing.outputs.sign == 'yes'
+        run: codesign --force --sign "$MACOS_IDENTITY" --timestamp "$DMG"
+
+      - name: Notarize and staple
+        if: steps.signing.outputs.notarize == 'yes' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.MACOS_NOTARY_ISSUER_ID }}
+        run: |
+          key="$RUNNER_TEMP/notary.p8"
+          echo "$NOTARY_KEY" | base64 --decode > "$key"
+          xcrun notarytool submit "$DMG" \
+            --key "$key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" \
+            --wait --timeout 30m
+          rm -f "$key"
+          # Stapling puts the ticket inside the .dmg, so the first launch
+          # needs no network.
+          xcrun stapler staple "$DMG"
+          # What Gatekeeper will say on the machine that downloads it.
+          spctl --assess --type open --context context:primary-signature -vv "$DMG"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: translocator-dmg
+          path: dist/*.dmg
+          if-no-files-found: error
+
+      - name: Remove the signing keychain
+        if: always() && steps.signing.outputs.sign == 'yes'
+        run: |
+          security list-keychains -d user -s login.keychain-db
+          security delete-keychain "$SIGNING_KEYCHAIN" || true
+
+  release:
+    name: Attach the .dmg to the release
+    needs: [app]
+    if: startsWith(github.ref, 'refs/tags/v')
+    # Nothing here needs a Mac, and Linux minutes are a tenth of the price.
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: translocator-dmg
+          path: dist
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes \
+            || gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
