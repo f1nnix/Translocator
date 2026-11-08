@@ -160,8 +160,21 @@ jobs:
             --wait --timeout 30m
           rm -f "$key"
           # Stapling puts the ticket inside the .dmg, so the first launch
-          # needs no network.
-          xcrun stapler staple "$DMG"
+          # needs no network. It fetches the ticket Apple has just issued
+          # over the network, and that fetch drops often enough to fail a
+          # release on its own ("The network connection was lost", error
+          # 68), so it is given a few goes before the build is called off.
+          for attempt in 1 2 3 4 5; do
+            if xcrun stapler staple "$DMG"; then
+              break
+            fi
+            if [ "$attempt" = 5 ]; then
+              echo "stapling failed five times; the notarization itself was accepted" >&2
+              exit 1
+            fi
+            echo "stapling attempt $attempt failed, trying again in 30s"
+            sleep 30
+          done
           # What Gatekeeper will say on the machine that downloads it.
           spctl --assess --type open --context context:primary-signature -vv "$DMG"
 
