@@ -9,7 +9,8 @@ use std::time::{Duration, SystemTime};
 use gpui::{Action, AnyWindowHandle, App, AppContext as _, Bounds, Entity, Point, TestAppContext, WindowBounds, WindowOptions, px, size};
 
 use crate::actions::*;
-use crate::app_state::{self, Settings};
+use crate::app_state;
+use crate::settings::Settings;
 use crate::pane::{FilePane, Side};
 use crate::workspace::Workspace;
 
@@ -44,16 +45,15 @@ fn open(cx: &mut TestAppContext, build: impl FnOnce(&Path)) -> Fixture {
         fs::create_dir_all(root.join(dir)).unwrap();
     }
     build(&root);
-    let settings = Settings {
-        show_hidden: false,
-        left_path: Some(root.join("left").display().to_string()),
-        right_path: Some(root.join("right").display().to_string()),
-    };
+    let mut settings = Settings::default();
+    settings.session.left_path = Some(root.join("left").display().to_string());
+    settings.session.right_path = Some(root.join("right").display().to_string());
     let state = root.join("state");
     let (window, ws) = cx.update(|cx| {
         gpui_kit::init(cx);
         app_state::init_for_tests(cx, &state, settings);
-        bind_keys(cx);
+        crate::themes::register(cx);
+        crate::keymap::apply(cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
                 origin: Point::default(),
@@ -198,6 +198,31 @@ impl Fixture {
     fn has_places(&self, cx: &mut TestAppContext, side: Side) -> bool {
         let pane = self.pane(cx, side);
         cx.update(|cx| pane.read(cx).has_places(cx))
+    }
+
+    /// The rows as drawn, in order, which is what a sort setting changes.
+    fn row_names(&self, cx: &mut TestAppContext, side: Side) -> Vec<String> {
+        let pane = self.pane(cx, side);
+        cx.update(|cx| {
+            pane.read(cx)
+                .listed_entries()
+                .iter()
+                .map(|e| String::from_utf8_lossy(&e.name).into_owned())
+                .collect()
+        })
+    }
+
+    fn dialog_open(&self, cx: &mut TestAppContext) -> bool {
+        self.draw(cx);
+        cx.update_window(self.window, |_, window, cx| {
+            gpui_kit::component::WindowExt::has_active_dialog(window, cx)
+        })
+        .unwrap_or(false)
+    }
+
+    /// The settings as they are on disk, which is what the next run reads.
+    fn saved_settings(&self) -> crate::settings::Settings {
+        crate::settings::Settings::load(&self.root.join("state/settings.json"))
     }
 
     fn files(&self, dir: &str) -> Vec<String> {
@@ -780,4 +805,216 @@ fn marks_and_operations_follow_the_filter(cx: &mut TestAppContext) {
     let pane = f.pane(cx, Side::Left);
     assert_eq!(cx.update(|cx| pane.read(cx).filter().to_string()), "*.log");
     assert_eq!(f.names(cx, Side::Left, true), ["app.log", "db.log"]);
+}
+
+#[gpui::test]
+fn a_rebound_key_moves_the_command_and_the_old_key_goes_quiet(cx: &mut TestAppContext) {
+    let f = open(cx, |root| write(&root.join("left/.hidden"), "h", 1));
+    f.focus(cx, Side::Left);
+
+    assert_eq!(advertised(cx, &f, &ToggleHidden), ["cmd-shift-.", "cmd->"]);
+
+    // The default key works, and the file list follows it.
+    f.keys(cx, "cmd-shift-.");
+    assert!(cx.update(|cx| hidden(cx)));
+    assert_eq!(f.row_names(cx, Side::Left), [".hidden"]);
+    f.keys(cx, "cmd-shift-.");
+    assert!(!cx.update(|cx| hidden(cx)));
+
+    // Move it to F9.
+    cx.update(|cx| {
+        crate::settings::update(cx, |settings| {
+            settings.keys.insert("toggle-hidden".into(), vec!["f9".into()]);
+        });
+        crate::keymap::apply(cx);
+    });
+
+    f.keys(cx, "f9");
+    assert!(cx.update(|cx| hidden(cx)), "F9 is the key now");
+    f.keys(cx, "cmd-shift-.");
+    assert!(
+        cx.update(|cx| hidden(cx)),
+        "the old key must do nothing, not toggle it back"
+    );
+
+    // Menus and tooltips look the binding up in GPUI's key map rather than
+    // in the settings, so it has to agree about which key is gone.
+    assert_eq!(advertised(cx, &f, &ToggleHidden), ["f9"]);
+
+    // And the defaults come back.
+    cx.update(|cx| {
+        crate::settings::update(cx, |settings| settings.keys.clear());
+        crate::keymap::apply(cx);
+    });
+    f.keys(cx, "cmd-shift-.");
+    assert!(!cx.update(|cx| hidden(cx)));
+    f.keys(cx, "f9");
+    assert!(!cx.update(|cx| hidden(cx)), "F9 is free again");
+}
+
+/// The keys GPUI would show for an action in the pane's context, which is
+/// where menu items and tooltips get theirs.
+fn advertised(cx: &mut TestAppContext, f: &Fixture, action: &dyn Action) -> Vec<String> {
+    f.draw(cx);
+    cx.update_window(f.window, |_, window, _| {
+        let context = gpui::KeyContext::parse(crate::actions::WORKSPACE).unwrap();
+        window
+            .bindings_for_action_in_context(action, context)
+            .iter()
+            .flat_map(|binding| binding.keystrokes())
+            .map(|keystroke| keystroke.unparse())
+            .collect::<Vec<_>>()
+    })
+    .unwrap()
+}
+
+fn hidden(cx: &App) -> bool {
+    cx.global::<app_state::AppState>().settings.general.show_hidden
+}
+
+#[gpui::test]
+fn applying_the_same_key_map_again_changes_nothing(cx: &mut TestAppContext) {
+    // Every row of the keys page resets through `apply`, so a page reset
+    // calls it once per command: it has to be free when nothing changed,
+    // or the key map would grow by a few hundred bindings each time.
+    let _f = open(cx, |_| {});
+    let count = |cx: &mut TestAppContext| {
+        cx.update(|cx| {
+            let f5 = vec![gpui::Keystroke::parse("f5").unwrap()];
+            cx.all_bindings_for_input(&f5).len()
+        })
+    };
+    let before = count(cx);
+    assert!(before > 0, "F5 is bound to copying files");
+    for _ in 0..5 {
+        cx.update(crate::keymap::apply);
+    }
+    assert_eq!(count(cx), before);
+
+    // A real change does add to it, and still leaves one binding in force.
+    cx.update(|cx| {
+        crate::settings::update(cx, |settings| {
+            settings.keys.insert("copy-files".into(), vec!["f9".into()]);
+        });
+        crate::keymap::apply(cx);
+    });
+    assert!(count(cx) > before, "the marker that takes F5 away is a binding too");
+    let live = cx
+        .update_window(_f.window, |_, window, _| {
+            let context = gpui::KeyContext::parse(crate::actions::PANE).unwrap();
+            window.bindings_for_action_in_context(&CopyFiles, context).len()
+        })
+        .unwrap();
+    assert_eq!(live, 1, "exactly one key copies files");
+}
+
+#[gpui::test]
+fn a_setting_changed_from_the_keyboard_reaches_the_file(cx: &mut TestAppContext) {
+    let f = open(cx, |root| write(&root.join("left/.hidden"), "h", 1));
+    f.focus(cx, Side::Left);
+    assert!(!f.saved_settings().general.show_hidden);
+    f.keys(cx, "cmd-shift-.");
+    assert!(
+        f.saved_settings().general.show_hidden,
+        "a setting is written as it changes, not only when the app quits"
+    );
+}
+
+#[gpui::test]
+fn folders_can_be_sorted_in_with_the_files(cx: &mut TestAppContext) {
+    let f = open(cx, |root| {
+        write(&root.join("left/a.txt"), "a", 1);
+        write(&root.join("left/m-dir/x.txt"), "x", 1);
+        write(&root.join("left/z.txt"), "z", 1);
+    });
+    assert_eq!(f.row_names(cx, Side::Left), ["m-dir", "a.txt", "z.txt"]);
+
+    // No reload: the panes rebuild their rows when the setting changes.
+    cx.update(|cx| crate::settings::update(cx, |s| s.general.folders_first = false));
+    cx.run_until_parked();
+    assert_eq!(f.row_names(cx, Side::Left), ["a.txt", "m-dir", "z.txt"]);
+}
+
+#[gpui::test]
+fn deleting_permanently_asks_even_when_trashing_does_not(cx: &mut TestAppContext) {
+    let f = open(cx, |root| write(&root.join("left/gone.txt"), "g", 1));
+    cx.update(|cx| crate::settings::update(cx, |s| s.general.confirm_trash = false));
+    f.select(cx, "gone.txt");
+    f.dispatch(cx, DeleteFiles);
+    assert!(
+        f.dialog_open(cx),
+        "a delete that cannot be undone has to be confirmed, whatever the setting says"
+    );
+    assert_eq!(f.files("left"), ["gone.txt"], "and nothing is gone yet");
+}
+
+#[gpui::test]
+fn the_chosen_theme_paints_the_window(cx: &mut TestAppContext) {
+    use gpui_kit::component::{ActiveTheme as _, Theme};
+
+    let f = open(cx, |_| {});
+    for (mode, theme, name, background) in [
+        (crate::settings::AppearanceMode::Dark, "dark", "Gruvbox Dark", "#282828"),
+        (crate::settings::AppearanceMode::Light, "light", "Solarized Light", "#fdf6e3"),
+    ] {
+        cx.update(|cx| {
+            crate::settings::update(cx, |settings| {
+                settings.appearance.mode = mode;
+                if theme == "dark" {
+                    settings.appearance.dark = name.to_string();
+                } else {
+                    settings.appearance.light = name.to_string();
+                }
+            });
+            crate::themes::apply(None, cx);
+            assert_eq!(cx.theme().theme_name().as_ref(), name);
+            assert_eq!(hex(cx.theme().background), background);
+            // A theme file carries no font size, so the one the settings
+            // ask for has to survive being applied.
+            assert_eq!(
+                f32::from(cx.theme().font_size),
+                cx.global::<app_state::AppState>().settings.general.font_size()
+            );
+            assert_eq!(Theme::global(cx).is_dark(), theme == "dark");
+        });
+    }
+
+    // An unknown theme in a hand-edited file falls back instead of failing.
+    cx.update(|cx| {
+        crate::settings::update(cx, |settings| {
+            settings.appearance.mode = crate::settings::AppearanceMode::Dark;
+            settings.appearance.dark = "Nonesuch".into();
+        });
+        crate::themes::apply(None, cx);
+        assert_eq!(cx.theme().theme_name().as_ref(), crate::themes::DEFAULT_DARK);
+    });
+    let _ = f;
+}
+
+/// A colour as the theme file writes it.
+fn hex(color: gpui_kit::Hsla) -> String {
+    let rgba = color.to_rgb();
+    let byte = |v: f32| (v * 255.).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", byte(rgba.r), byte(rgba.g), byte(rgba.b))
+}
+
+#[gpui::test]
+fn the_settings_window_opens_once_and_draws(cx: &mut TestAppContext) {
+    let _f = open(cx, |_| {});
+    let before = cx.update(|cx| cx.windows().len());
+    cx.update(|cx| crate::settings_window::open(cx));
+    cx.run_until_parked();
+    let handle = cx.update(|cx| cx.global::<app_state::AppState>().settings_window);
+    let handle = handle.expect("the settings window is remembered");
+    assert_eq!(cx.update(|cx| cx.windows().len()), before + 1);
+
+    // Every page, every group and every key row is built here: this is
+    // where a mistake in one of them would show up.
+    cx.update_window(handle, |_, window, cx| window.draw(cx).clear(cx)).unwrap();
+    cx.run_until_parked();
+
+    // Asking again brings that window forward rather than opening a second.
+    cx.update(|cx| crate::settings_window::open(cx));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| cx.windows().len()), before + 1);
 }

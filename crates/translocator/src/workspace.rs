@@ -10,7 +10,7 @@ use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputSt
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::progress::Progress as ProgressBar;
 use gpui_kit::component::{
-    ActiveTheme as _, IconName, ResizableState, Selectable as _, Sizable as _, Theme, ThemeMode, TitleBar,
+    ActiveTheme as _, IconName, ResizableState, Selectable as _, Sizable as _, TitleBar,
     WindowExt as _, h_flex, h_resizable, resizable_panel, v_flex,
 };
 use gpui_kit::{prelude::*, *};
@@ -25,8 +25,10 @@ use crate::bookmarks;
 use crate::dialogs;
 use crate::editor;
 use crate::jobs::{JobStatus, Jobs};
+use crate::keymap::shortcut;
 use crate::pane::{DraggedFiles, FilePane, Location, PaneEvent, Side, tilde};
 use crate::properties;
+use crate::settings::AppearanceMode;
 use crate::util::blocking;
 
 type Work<T> = Arc<dyn Fn(&dyn Vfs, &OpCtx, &Progress) -> VfsResult<T> + Send + Sync>;
@@ -47,11 +49,13 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let settings = cx.global::<AppState>().settings.clone();
+        let settings = cx.global::<AppState>().settings.session.clone();
+        let restore = cx.global::<AppState>().settings.general.restore_folders;
         let home = tl_local::local_vfs().home();
         let start = |saved: &Option<String>| {
             saved
                 .as_ref()
+                .filter(|_| restore)
                 .map(|p| VPath::parse(p))
                 .filter(|p| p.to_local().is_dir())
                 .unwrap_or_else(|| home.clone())
@@ -80,7 +84,7 @@ impl Workspace {
             cx.observe(&jobs, |_, _, cx| cx.notify()),
         ];
         subs.push(cx.observe_window_appearance(window, |_, window, cx| {
-            Theme::sync_system_appearance(Some(window), cx);
+            crate::themes::apply(Some(window), cx);
         }));
 
         let focus = left.read(cx).focus.clone();
@@ -190,10 +194,10 @@ impl Workspace {
         let right = self.right.read(cx).location().clone();
         let state = cx.global_mut::<AppState>();
         if left.is_local() {
-            state.settings.left_path = Some(left.path.display());
+            state.settings.session.left_path = Some(left.path.display());
         }
         if right.is_local() {
-            state.settings.right_path = Some(right.path.display());
+            state.settings.session.right_path = Some(right.path.display());
         }
     }
 
@@ -657,9 +661,16 @@ impl Workspace {
         } else {
             format!("Delete {}{place} permanently?", sel.describe())
         };
-        let answer = dialogs::ask_confirm(window, cx, title, message, if trash { "Move to Trash" } else { "Delete" }, !trash);
+        // Permanent deletion always asks: a setting that turns off the last
+        // question before an unrecoverable delete is not one worth having.
+        let ask = !trash || cx.global::<AppState>().settings.general.confirm_trash;
+        let answer = ask.then(|| {
+            dialogs::ask_confirm(window, cx, title, message, if trash { "Move to Trash" } else { "Delete" }, !trash)
+        });
         cx.spawn_in(window, async move |this, cx| {
-            if !answer.await {
+            if let Some(answer) = answer
+                && !answer.await
+            {
                 return;
             }
             let _ = this.update_in(cx, move |this, window, cx| {
@@ -930,11 +941,13 @@ impl Workspace {
         // Inside an archive: the folder that holds it.
         let loc = pane.location().archive_folder().unwrap_or_else(|| pane.location().clone());
         let elevated = pane.elevated();
+        let preferred = cx.global::<AppState>().settings.general.terminal.clone();
+        let preferred = Some(preferred.as_str());
         let result = if loc.is_local() {
-            crate::terminal::open(Some(&loc.path.to_local()), None)
+            crate::terminal::open(Some(&loc.path.to_local()), None, preferred)
         } else {
             match loc.vfs.terminal_command(&loc.path, elevated) {
-                Some(argv) => crate::terminal::open(None, Some(&argv)),
+                Some(argv) => crate::terminal::open(None, Some(&argv), preferred),
                 None => Ok(()),
             }
         };
@@ -1539,14 +1552,9 @@ impl Workspace {
     }
 
     fn toggle_hidden(&mut self, _: &ToggleHidden, _: &mut Window, cx: &mut Context<Self>) {
-        let show = {
-            let state = cx.global_mut::<AppState>();
-            state.settings.show_hidden = !state.settings.show_hidden;
-            state.settings.show_hidden
-        };
-        for pane in [&self.left, &self.right] {
-            pane.update(cx, |p, cx| p.set_show_hidden(show, cx));
-        }
+        // Every pane watches the settings, so this is all it takes.
+        let show = !cx.global::<AppState>().settings.general.show_hidden;
+        crate::settings::update(cx, |settings| settings.general.show_hidden = show);
     }
 
     fn toggle_sudo(&mut self, _: &ToggleSudo, window: &mut Window, cx: &mut Context<Self>) {
@@ -1800,7 +1808,7 @@ impl Workspace {
 
     fn render_function_bar(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
-        let key = |id: &'static str, k: &'static str, label: &'static str, action: Box<dyn Action>| {
+        let key = |id: &'static str, label: &'static str, action: Box<dyn Action>, k: Option<SharedString>| {
             let action: std::rc::Rc<dyn Action> = action.into();
             h_flex()
                 .id(id)
@@ -1811,7 +1819,13 @@ impl Workspace {
                 .cursor_pointer()
                 .rounded_sm()
                 .hover(|s| s.bg(theme.list_hover))
-                .child(div().text_size(px(10.)).font_weight(FontWeight::SEMIBOLD).text_color(theme.muted_foreground).child(k))
+                .children(k.map(|k| {
+                    div()
+                        .text_size(px(10.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(theme.muted_foreground)
+                        .child(k)
+                }))
                 .child(div().text_size(px(12.)).child(label))
                 .on_click(move |_, window, cx| window.dispatch_action(action.boxed_clone(), cx))
         };
@@ -1823,14 +1837,14 @@ impl Workspace {
             .border_t_1()
             .border_color(theme.border)
             .bg(theme.title_bar)
-            .child(key("fk2", "F2", "Rename", Box::new(RenameFile)))
-            .child(key("fk3", "F3", "View", Box::new(ViewFile)))
-            .child(key("fk4", "F4", "Edit", Box::new(EditFile)))
-            .child(key("fk5", "F5", "Copy", Box::new(CopyFiles)))
-            .child(key("fk6", "F6", "Move", Box::new(MoveFiles)))
-            .child(key("fk7", "F7", "New Folder", Box::new(NewFolder)))
-            .child(key("fk8", "F8", "Delete", Box::new(TrashFiles)))
-            .child(key("fk9", "⌘E", "Command", Box::new(FocusCommandLine)))
+            .child(key("fk2", "Rename", Box::new(RenameFile), shortcut("rename-file", cx)))
+            .child(key("fk3", "View", Box::new(ViewFile), shortcut("view-file", cx)))
+            .child(key("fk4", "Edit", Box::new(EditFile), shortcut("edit-file", cx)))
+            .child(key("fk5", "Copy", Box::new(CopyFiles), shortcut("copy-files", cx)))
+            .child(key("fk6", "Move", Box::new(MoveFiles), shortcut("move-files", cx)))
+            .child(key("fk7", "New Folder", Box::new(NewFolder), shortcut("new-folder", cx)))
+            .child(key("fk8", "Delete", Box::new(TrashFiles), shortcut("trash-files", cx)))
+            .child(key("fk9", "Command", Box::new(FocusCommandLine), shortcut("focus-command-line", cx)))
     }
 
     fn render_command_line(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1955,7 +1969,7 @@ impl Workspace {
                         .ghost()
                         .xsmall()
                         .tab_stop(false)
-                        .tooltip("Jobs (⌘J)")
+                        .tooltip(tooltip("Jobs", "toggle-jobs", cx))
                         .on_click(|_, window, cx| window.dispatch_action(Box::new(ToggleJobs), cx)),
                 )
                 .child(
@@ -1964,7 +1978,7 @@ impl Workspace {
                         .ghost()
                         .xsmall()
                         .tab_stop(false)
-                        .tooltip("Bookmarks (⌘B)")
+                        .tooltip(tooltip("Bookmarks", "manage-bookmarks", cx))
                         .on_click(|_, window, cx| window.dispatch_action(Box::new(ManageBookmarks), cx)),
                 )
                 .child(
@@ -1973,12 +1987,24 @@ impl Workspace {
                         .ghost()
                         .xsmall()
                         .tab_stop(false)
-                        .tooltip("Toggle light / dark")
+                        .tooltip(if dark { "Switch to light" } else { "Switch to dark" })
                         .on_click(move |_, window, cx| {
-                            let mode = if dark { ThemeMode::Light } else { ThemeMode::Dark };
-                            Theme::change(mode, Some(window), cx);
-                            crate::apply_theme_tweaks(cx);
+                            // Picking a side here is a decision, so it is
+                            // remembered instead of following the system
+                            // back at the next appearance change.
+                            let mode = if dark { AppearanceMode::Light } else { AppearanceMode::Dark };
+                            crate::settings::update(cx, |s| s.appearance.mode = mode);
+                            crate::themes::apply(Some(window), cx);
                         }),
+                )
+                .child(
+                    Button::new("settings")
+                        .icon(Lucide::Settings)
+                        .ghost()
+                        .xsmall()
+                        .tab_stop(false)
+                        .tooltip(tooltip("Settings", "open-settings", cx))
+                        .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenSettings), cx)),
                 ),
         )
     }
@@ -2056,6 +2082,14 @@ impl Render for Workspace {
             .child(self.render_command_line(cx))
             .children(strip)
             .child(self.render_function_bar(cx))
+    }
+}
+
+/// "Jobs (⌘J)", or just "Jobs" when the command has no key.
+fn tooltip(label: &str, id: &'static str, cx: &App) -> SharedString {
+    match shortcut(id, cx) {
+        Some(keys) => format!("{label} ({keys})").into(),
+        None => label.to_string().into(),
     }
 }
 

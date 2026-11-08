@@ -1,7 +1,8 @@
-//! Actions and the default key map.
+//! The actions the application can perform, and the menu bar.
 //!
-//! Classic dual-pane bindings (F3–F8, Tab, Space/Insert to mark) plus the
-//! macOS conventions people expect (⌘⌫ to trash, ⌘C/⌘V, ⌘[ / ⌘]).
+//! Which keys reach them is [`crate::keymap`]'s table: classic dual-pane
+//! bindings (F3–F8, Tab, Space/Insert to mark) plus the macOS conventions
+//! people expect (⌘⌫ to trash, ⌘C/⌘V, ⌘[ / ⌘]), all of them rebindable.
 
 use gpui_kit::*;
 
@@ -82,6 +83,7 @@ actions!(
         FocusPane,
         ToggleJobs,
         ToggleConsole,
+        OpenSettings,
         Quit,
         // Editor window.
         SaveFile,
@@ -102,114 +104,16 @@ pub const PANE: &str = "FilePane";
 pub const WORKSPACE: &str = "Workspace";
 /// Key context of viewer/editor windows.
 pub const EDITOR: &str = "EditorWindow";
+/// Key context of the command line under the panes.
+pub const COMMAND_LINE: &str = "CommandLine";
 
-pub fn bind_keys(cx: &mut App) {
-    let p = Some(PANE);
-    let w = Some(WORKSPACE);
-    cx.bind_keys([
-        KeyBinding::new("up", CursorUp, p),
-        KeyBinding::new("down", CursorDown, p),
-        KeyBinding::new("pageup", PageUp, p),
-        KeyBinding::new("pagedown", PageDown, p),
-        KeyBinding::new("home", CursorHome, p),
-        KeyBinding::new("end", CursorEnd, p),
-        KeyBinding::new("alt-up", CursorHome, p),
-        KeyBinding::new("alt-down", CursorEnd, p),
-        KeyBinding::new("shift-up", MarkUp, p),
-        KeyBinding::new("shift-down", MarkDown, p),
-        KeyBinding::new("space", ToggleMark, p),
-        KeyBinding::new("insert", ToggleMark, p),
-        KeyBinding::new("cmd-a", MarkAll, p),
-        KeyBinding::new("cmd-shift-a", UnmarkAll, p),
-        KeyBinding::new("cmd-alt-a", InvertMarks, p),
-        KeyBinding::new("enter", Open, p),
-        KeyBinding::new("cmd-down", Open, p),
-        KeyBinding::new("backspace", FilterBackspace, p),
-        KeyBinding::new("cmd-up", GoParent, p),
-        KeyBinding::new("cmd-[", GoBack, p),
-        KeyBinding::new("cmd-]", GoForward, p),
-        KeyBinding::new("cmd-shift-h", GoHome, p),
-        KeyBinding::new("cmd-shift-g", GoToPath, p),
-        KeyBinding::new("cmd-l", GoToPath, p),
-        KeyBinding::new("cmd-r", Refresh, p),
-        KeyBinding::new("cmd-shift-.", ToggleHidden, w),
-        KeyBinding::new("cmd->", ToggleHidden, w),
-        KeyBinding::new("cmd-t", NewTab, p),
-        KeyBinding::new("cmd-w", CloseTab, p),
-        KeyBinding::new("ctrl-tab", NextTab, p),
-        KeyBinding::new("ctrl-shift-tab", PrevTab, p),
-        KeyBinding::new("cmd-shift-]", NextTab, p),
-        KeyBinding::new("cmd-shift-[", PrevTab, p),
-        KeyBinding::new("tab", SwitchPane, p),
-        KeyBinding::new("cmd-u", SwapPanes, w),
-        KeyBinding::new("cmd-=", MirrorPane, p),
-        KeyBinding::new("alt-f1", LocationsLeft, w),
-        KeyBinding::new("alt-f2", LocationsRight, w),
-        KeyBinding::new("cmd-k", Locations, p),
-        KeyBinding::new("cmd-1", GoToPlace { index: 0 }, p),
-        KeyBinding::new("cmd-2", GoToPlace { index: 1 }, p),
-        KeyBinding::new("cmd-3", GoToPlace { index: 2 }, p),
-        KeyBinding::new("cmd-4", GoToPlace { index: 3 }, p),
-        KeyBinding::new("cmd-5", GoToPlace { index: 4 }, p),
-        KeyBinding::new("cmd-6", GoToPlace { index: 5 }, p),
-        KeyBinding::new("cmd-7", GoToPlace { index: 6 }, p),
-        KeyBinding::new("cmd-8", GoToPlace { index: 7 }, p),
-        KeyBinding::new("cmd-9", GoToPlace { index: 8 }, p),
-        KeyBinding::new("f3", ViewFile, p),
-        KeyBinding::new("f4", EditFile, p),
-        KeyBinding::new("shift-f4", NewFile, p),
-        KeyBinding::new("f5", CopyFiles, p),
-        KeyBinding::new("f6", MoveFiles, p),
-        KeyBinding::new("f2", RenameFile, p),
-        KeyBinding::new("shift-f6", RenameFile, p),
-        KeyBinding::new("f7", NewFolder, p),
-        KeyBinding::new("cmd-shift-n", NewFolder, p),
-        KeyBinding::new("f8", TrashFiles, p),
-        KeyBinding::new("cmd-backspace", TrashFiles, p),
-        KeyBinding::new("shift-f8", DeleteFiles, p),
-        KeyBinding::new("cmd-alt-backspace", DeleteFiles, p),
-        KeyBinding::new("cmd-i", Properties, p),
-        KeyBinding::new("cmd-alt-c", CopyPath, p),
-        KeyBinding::new("cmd-shift-t", OpenTerminal, p),
-        KeyBinding::new("cmd-o", OpenExternally, p),
-        KeyBinding::new("cmd-shift-r", RevealInFinder, p),
-        KeyBinding::new("alt-enter", CalcSize, p),
-        KeyBinding::new("alt-f7", FindFiles, p),
-        KeyBinding::new("cmd-f", FindFiles, p),
-        KeyBinding::new("shift-f2", CompareDirs, p),
-        KeyBinding::new("cmd-shift-c", CompareDirs, p),
-        KeyBinding::new("cmd-alt-s", SyncDirs, p),
-        KeyBinding::new("ctrl-m", MultiRename, p),
-        KeyBinding::new("cmd-shift-m", MultiRename, p),
-        KeyBinding::new("ctrl-pagedown", OpenArchive, p),
-        KeyBinding::new("alt-f9", ExtractArchive, p),
-        KeyBinding::new("cmd-alt-e", ExtractArchive, p),
-        KeyBinding::new("alt-f5", PackFiles, p),
-        KeyBinding::new("cmd-alt-p", PackFiles, p),
-        KeyBinding::new("shift-alt-f5", Compress, p),
-        KeyBinding::new("cmd-alt-shift-p", Compress, p),
-        KeyBinding::new("shift-alt-f9", Decompress, p),
-        KeyBinding::new("cmd-alt-shift-e", Decompress, p),
-        KeyBinding::new("cmd-c", ClipboardCopy, p),
-        KeyBinding::new("cmd-x", ClipboardCut, p),
-        KeyBinding::new("cmd-v", ClipboardPaste, p),
-        KeyBinding::new("cmd-shift-s", ToggleSudo, p),
-        KeyBinding::new("cmd-d", TogglePlace, p),
-        KeyBinding::new("cmd-b", ManageBookmarks, w),
-        KeyBinding::new("cmd-e", FocusCommandLine, w),
-        KeyBinding::new("escape", FocusPane, Some("CommandLine")),
-        KeyBinding::new("cmd-j", ToggleJobs, w),
-        KeyBinding::new("cmd-shift-j", ToggleConsole, w),
-        KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("cmd-s", SaveFile, Some(EDITOR)),
-        KeyBinding::new("cmd-w", CloseEditor, Some(EDITOR)),
-    ]);
-}
-
-/// The application menu bar. Bind keys first so shortcuts show up.
+/// The application menu bar. [`crate::keymap::apply`] sets it after the key
+/// map, so every item shows the key it actually answers to.
 pub fn set_menus(cx: &mut App) {
     cx.set_menus([
         Menu::new("Translocator").items([
+            MenuItem::action("Settings…", OpenSettings),
+            MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
             MenuItem::action("Quit Translocator", Quit),

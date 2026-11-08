@@ -174,7 +174,12 @@ impl SyncView {
             .update(cx, |ws, cx| ws.start_sync(plan, left, right, window, cx));
     }
 
-    fn render_side(side: Option<&SyncSide>, newer: bool, theme: &gpui_kit::component::Theme) -> AnyElement {
+    fn render_side(
+        side: Option<&SyncSide>,
+        newer: bool,
+        theme: &gpui_kit::component::Theme,
+        dates: crate::settings::DateFormat,
+    ) -> AnyElement {
         let Some(side) = side else {
             return div().w(px(190.)).flex_shrink_0().into_any_element();
         };
@@ -185,7 +190,7 @@ impl SyncView {
                 "folder".to_string()
             }
         } else {
-            format!("{} · {}", human_size(side.size), format_date(side.mtime))
+            format!("{} · {}", human_size(side.size), format_date(side.mtime, dates))
         };
         div()
             .w(px(190.))
@@ -199,6 +204,7 @@ impl SyncView {
 
     fn render_rows(&self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let theme = cx.theme().clone();
+        let dates = cx.global::<crate::app_state::AppState>().settings.general.date_format;
         let Some(plan) = &self.plan else { return Vec::new() };
         range
             .filter_map(|row| {
@@ -252,11 +258,13 @@ impl SyncView {
                             item.left.as_ref(),
                             item.state == SyncState::LeftNewer,
                             &theme,
+                            dates,
                         ))
                         .child(Self::render_side(
                             item.right.as_ref(),
                             item.state == SyncState::RightNewer,
                             &theme,
+                            dates,
                         ))
                         .into_any_element(),
                 )

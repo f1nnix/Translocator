@@ -8,29 +8,22 @@ mod bridge;
 mod dialogs;
 mod editor;
 mod jobs;
+mod keymap;
 mod pane;
 mod properties;
 mod rename;
+mod settings;
+mod settings_window;
 mod sync;
 mod terminal;
+mod themes;
 #[cfg(test)]
 mod ui_tests;
 mod util;
 mod workspace;
 
-use gpui_kit::component::{Theme, TitleBar};
+use gpui_kit::component::TitleBar;
 use gpui_kit::*;
-
-/// Density and fonts for a file manager (the component defaults are
-/// sized for forms). Re-applied after theme mode changes.
-pub fn apply_theme_tweaks(cx: &mut App) {
-    Theme::update(cx, |t| {
-        t.font_size = px(13.);
-        t.mono_font_size = px(12.);
-        t.radius = px(5.);
-        t.radius_lg = px(8.);
-    });
-}
 
 /// Matches the basename of `packaging/translocator.desktop`: that is how a
 /// Linux desktop finds this window's icon, through `app_id` on Wayland and
@@ -72,12 +65,14 @@ fn main() {
         .with_quit_mode(QuitMode::LastWindowClosed)
         .run(|cx: &mut App| {
             gpui_kit::init(cx);
-            Theme::sync_system_appearance(None, cx);
-            apply_theme_tweaks(cx);
             app_state::init(cx);
-            actions::bind_keys(cx);
+            themes::register(cx);
+            themes::apply(None, cx);
+            // Builds the key map from the settings, and the menus from it.
+            keymap::apply(cx);
             cx.on_action(|_: &actions::Quit, cx: &mut App| cx.quit());
-            actions::set_menus(cx);
+            // Bound without a context, so ⌘, works from any window.
+            cx.on_action(|_: &actions::OpenSettings, cx: &mut App| settings_window::open(cx));
 
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),

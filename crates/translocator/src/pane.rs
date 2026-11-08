@@ -16,6 +16,7 @@ use gpui_kit::component::tab::{Tab, TabBar};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, Theme, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{prelude::*, *};
+use serde::{Deserialize, Serialize};
 use tl_core::archive::ArchiveFormat;
 use tl_core::util::{human_size, wildcard_match};
 use tl_core::{Entry, EntryKind, OpCtx, Place, SpaceInfo, VPath, Vfs, VfsError};
@@ -25,12 +26,31 @@ use crate::app_state::AppState;
 use crate::dialogs;
 use crate::util::{blocking, entry_icon, format_date, natural_cmp};
 
-pub const ROW_H: f32 = 22.;
-const FONT: f32 = 13.;
 const EXT_W: f32 = 52.;
 const SIZE_W: f32 = 74.;
 const DATE_W: f32 = 116.;
 const MODE_W: f32 = 84.;
+
+/// Height of one row, which the settings make denser or roomier. Every row
+/// is the same height: the list is virtualized and measures only the first.
+fn row_height(cx: &App) -> Pixels {
+    px(cx.global::<AppState>().settings.general.row_height())
+}
+
+/// Size of the text in the list, which [`crate::themes::tweaks`] keeps in
+/// step with the setting.
+fn font_size(cx: &App) -> Pixels {
+    cx.theme().font_size
+}
+
+/// The sort a new tab starts with.
+fn default_sort(cx: &App) -> Sort {
+    let general = &cx.global::<AppState>().settings.general;
+    Sort {
+        key: general.sort,
+        desc: general.sort_descending,
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
@@ -114,12 +134,35 @@ pub fn tilde(path: &VPath) -> String {
     text
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 pub enum SortKey {
+    #[default]
     Name,
     Ext,
     Size,
     Modified,
+}
+
+impl SortKey {
+    /// Name in the settings file and the settings window's dropdown.
+    pub fn id(&self) -> &'static str {
+        match self {
+            SortKey::Name => "name",
+            SortKey::Ext => "extension",
+            SortKey::Size => "size",
+            SortKey::Modified => "modified",
+        }
+    }
+
+    pub fn from_id(id: &str) -> SortKey {
+        match id {
+            "extension" => SortKey::Ext,
+            "size" => SortKey::Size,
+            "modified" => SortKey::Modified,
+            _ => SortKey::Name,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -187,7 +230,7 @@ impl Render for DragPreview {
             .border_1()
             .border_color(cx.theme().border)
             .shadow_md()
-            .text_size(px(FONT))
+            .text_size(font_size(cx))
             .child(Icon::new(Lucide::Files).small())
             .child(self.label.clone())
     }
@@ -236,7 +279,7 @@ pub struct TabState {
 }
 
 impl TabState {
-    fn new(loc: Location, elevated: bool) -> Self {
+    fn new(loc: Location, elevated: bool, sort: Sort) -> Self {
         TabState {
             loc,
             rows: Vec::new(),
@@ -245,10 +288,7 @@ impl TabState {
             anchor: 0,
             marked: HashSet::new(),
             filter: String::new(),
-            sort: Sort {
-                key: SortKey::Name,
-                desc: false,
-            },
+            sort,
             elevated,
             loading: false,
             error: None,
@@ -294,7 +334,11 @@ pub struct FilePane {
     pub focus: FocusHandle,
     tabs: Vec<TabState>,
     active: usize,
+    /// The two settings the rows are built from, as this pane last built
+    /// them: a change to either rebuilds, anything else in the settings
+    /// does not.
     show_hidden: bool,
+    folders_first: bool,
     narrow: u8,
     /// How many characters of path fit in the header.
     crumb_chars: usize,
@@ -325,7 +369,14 @@ pub(crate) fn matches_filter(name: &str, query: &str) -> bool {
     name.to_lowercase().contains(&query.to_lowercase())
 }
 
-fn build_rows(raw: &[Entry], sort: Sort, show_hidden: bool, at_root: bool, filter: &str) -> Vec<Row> {
+fn build_rows(
+    raw: &[Entry],
+    sort: Sort,
+    folders_first: bool,
+    show_hidden: bool,
+    at_root: bool,
+    filter: &str,
+) -> Vec<Row> {
     let query = filter.trim();
     let mut rows: Vec<Row> = raw
         .iter()
@@ -339,7 +390,7 @@ fn build_rows(raw: &[Entry], sort: Sort, show_hidden: bool, at_root: bool, filte
         .collect();
     rows.sort_by(|a, b| {
         let (ad, bd) = (a.entry.is_dir(), b.entry.is_dir());
-        if ad != bd {
+        if folders_first && ad != bd {
             return bd.cmp(&ad);
         }
         let by_name = || natural_cmp(&a.name, &b.name).then_with(|| a.entry.name.cmp(&b.entry.name));
@@ -379,14 +430,17 @@ impl FilePane {
                 cx.notify();
             }),
             cx.on_blur(&focus, window, |_this: &mut Self, _window, cx| cx.notify()),
+            cx.observe_global::<AppState>(Self::settings_changed),
         ];
-        let show_hidden = cx.global::<AppState>().settings.show_hidden;
+        let general = cx.global::<AppState>().settings.general.clone();
+        let sort = default_sort(cx);
         let mut pane = FilePane {
             side,
             focus,
-            tabs: vec![TabState::new(loc, elevated)],
+            tabs: vec![TabState::new(loc, elevated, sort)],
             active: 0,
-            show_hidden,
+            show_hidden: general.show_hidden,
+            folders_first: general.folders_first,
             narrow: 0,
             crumb_chars: 60,
             list_origin: Point::default(),
@@ -474,8 +528,17 @@ impl FilePane {
         cx.notify();
     }
 
-    pub fn set_show_hidden(&mut self, show: bool, cx: &mut Context<Self>) {
-        self.show_hidden = show;
+    /// Rebuilds the rows when a setting they are built from has changed.
+    /// Every pane in every window hears this, so an ordinary change — a
+    /// connection opening, a file copied to the clipboard — must cost
+    /// nothing, and an uninteresting one returns here.
+    fn settings_changed(&mut self, cx: &mut Context<Self>) {
+        let general = &cx.global::<AppState>().settings.general;
+        let wanted = (general.show_hidden, general.folders_first);
+        if wanted == (self.show_hidden, self.folders_first) {
+            return;
+        }
+        (self.show_hidden, self.folders_first) = wanted;
         for ix in 0..self.tabs.len() {
             self.rebuild_rows(ix, None);
         }
@@ -485,12 +548,12 @@ impl FilePane {
     // ----- loading --------------------------------------------------------
 
     fn rebuild_rows(&mut self, ix: usize, select: Option<&[u8]>) {
-        let show_hidden = self.show_hidden;
+        let (show_hidden, folders_first) = (self.show_hidden, self.folders_first);
         let tab = &mut self.tabs[ix];
         let keep = select
             .map(<[u8]>::to_vec)
             .or_else(|| tab.rows.get(tab.cursor).map(|r| r.entry.name.clone()));
-        tab.rows = build_rows(&tab.raw, tab.sort, show_hidden, tab.loc.path.is_root(), &tab.filter);
+        tab.rows = build_rows(&tab.raw, tab.sort, folders_first, show_hidden, tab.loc.path.is_root(), &tab.filter);
         // Against the whole listing rather than the visible rows: a mark
         // has to survive the filter being narrowed and widened again, and
         // only a file that has actually gone should lose it.
@@ -538,7 +601,7 @@ impl FilePane {
                     Err(err) => {
                         tab.error = Some(err.to_string().into());
                         tab.raw.clear();
-                        tab.rows = build_rows(&[], tab.sort, true, tab.loc.path.is_root(), "");
+                        tab.rows = build_rows(&[], tab.sort, true, true, tab.loc.path.is_root(), "");
                         tab.cursor = 0;
                         match err {
                             VfsError::PermissionDenied(_) if tab.loc.vfs.capabilities().elevation && !tab.elevated => {
@@ -697,7 +760,8 @@ impl FilePane {
             self.navigate(loc.path, None, cx);
             return;
         }
-        *tab = TabState::new(loc, elevated);
+        let sort = tab.sort;
+        *tab = TabState::new(loc, elevated, sort);
         let ix = self.active;
         self.load(ix, None, cx);
         cx.emit(PaneEvent::LocationChanged);
@@ -721,7 +785,8 @@ impl FilePane {
             let tab_vfs = &self.tabs[ix].loc.vfs;
             if Arc::ptr_eq(tab_vfs, vfs) || tab_vfs.host().is_some_and(|(host, _)| Arc::ptr_eq(&host, vfs)) {
                 let home = tl_local::local_vfs().home();
-                self.tabs[ix] = TabState::new(Location::local(home), false);
+                let sort = self.tabs[ix].sort;
+                self.tabs[ix] = TabState::new(Location::local(home), false, sort);
                 self.load(ix, None, cx);
             }
         }
@@ -1123,7 +1188,8 @@ impl FilePane {
         let tab = self.tab();
         let loc = tab.loc.clone();
         let elevated = tab.elevated;
-        self.tabs.insert(self.active + 1, TabState::new(loc, elevated));
+        let sort = tab.sort;
+        self.tabs.insert(self.active + 1, TabState::new(loc, elevated, sort));
         self.active += 1;
         let ix = self.active;
         self.load(ix, None, cx);
@@ -1315,7 +1381,12 @@ impl FilePane {
         } else {
             human_size(entry.size).into()
         };
-        let date: SharedString = if row.parent { SharedString::default() } else { format_date(entry.mtime).into() };
+        let general = cx.global::<AppState>().settings.general.clone();
+        let date: SharedString = if row.parent {
+            SharedString::default()
+        } else {
+            format_date(entry.mtime, general.date_format).into()
+        };
         let mode: SharedString = if row.parent { SharedString::default() } else { entry.mode_string().into() };
         let link: Option<SharedString> = entry
             .link_target
@@ -1340,11 +1411,11 @@ impl FilePane {
 
         h_flex()
             .id(("row", ix))
-            .h(px(ROW_H))
+            .h(row_height(cx))
             .w_full()
             .px_2()
             .gap_2()
-            .text_size(px(FONT))
+            .text_size(font_size(cx))
             .text_color(fg)
             .when_some(bg, |el, bg| el.bg(bg))
             // Always the same 2px, so the row does not shift sideways as
@@ -1352,7 +1423,9 @@ impl FilePane {
             .border_l_2()
             .border_color(if is_cursor && focused { accent } else { accent.opacity(0.) })
             .when(hidden, |el| el.opacity(0.6))
-            .child(Icon::new(icon).size(px(15.)).flex_shrink_0().text_color(icon_color))
+            .when(general.show_icons, |el| {
+                el.child(Icon::new(icon).size(px(15.)).flex_shrink_0().text_color(icon_color))
+            })
             .child(
                 h_flex()
                     .flex_1()
@@ -1530,7 +1603,7 @@ impl FilePane {
                     .flex_1()
                     .min_w_0()
                     .overflow_hidden()
-                    .text_size(px(FONT))
+                    .text_size(font_size(cx))
                     .children(crumb_els),
             )
             .when(tab.loading, |el| {

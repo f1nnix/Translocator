@@ -4,12 +4,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use gpui_kit::*;
-use serde::{Deserialize, Serialize};
 use tl_core::askpass::AskpassServer;
-use tl_core::bookmark::app_data_dir;
 use tl_core::{BookmarkStore, PluginEnv, PluginRegistry, VPath, Vfs};
 
 use crate::bridge::{self, UiBridge};
+use crate::settings::SettingsStore;
 
 pub struct AppState {
     pub registry: PluginRegistry,
@@ -18,9 +17,12 @@ pub struct AppState {
     pub connections: Vec<Connection>,
     pub env: PluginEnv,
     pub bridge: UiBridge,
-    pub settings: Settings,
+    pub settings: SettingsStore,
     pub clipboard: Option<FileClip>,
     pub main_window: Option<AnyWindowHandle>,
+    /// The settings window, while one is open: a second would edit the same
+    /// file from two places.
+    pub settings_window: Option<AnyWindowHandle>,
     _askpass: Option<AskpassServer>,
 }
 
@@ -39,40 +41,6 @@ pub struct FileClip {
     pub names: Vec<Vec<u8>>,
     pub elevated: bool,
     pub cut: bool,
-}
-
-/// Persisted between runs.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct Settings {
-    #[serde(default)]
-    pub show_hidden: bool,
-    #[serde(default)]
-    pub left_path: Option<String>,
-    #[serde(default)]
-    pub right_path: Option<String>,
-}
-
-impl Settings {
-    fn path() -> PathBuf {
-        app_data_dir().join("settings.json")
-    }
-
-    fn load() -> Self {
-        std::fs::read(Self::path())
-            .ok()
-            .and_then(|b| serde_json::from_slice(&b).ok())
-            .unwrap_or_default()
-    }
-
-    pub fn save(&self) {
-        let path = Self::path();
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        if let Ok(json) = serde_json::to_vec_pretty(self) {
-            let _ = std::fs::write(path, json);
-        }
-    }
 }
 
 /// Removes runtime directories of instances that are no longer running.
@@ -133,15 +101,17 @@ pub fn init(cx: &mut App) {
         connections: Vec::new(),
         env,
         bridge,
-        settings: Settings::load(),
+        settings: SettingsStore::load(crate::settings::Settings::default_path()),
         clipboard: None,
         main_window: None,
+        settings_window: None,
         _askpass: askpass,
     });
 
     cx.on_app_quit(|cx| {
+        let state = cx.global_mut::<AppState>();
+        state.settings.flush();
         let state = cx.global::<AppState>();
-        state.settings.save();
         for conn in &state.connections {
             conn.vfs.disconnect();
         }
@@ -156,7 +126,7 @@ pub fn init(cx: &mut App) {
 /// State for UI tests: no askpass server, bookmarks and settings kept in
 /// `dir` (the user's own files are never read or written).
 #[cfg(test)]
-pub fn init_for_tests(cx: &mut App, dir: &std::path::Path, settings: Settings) {
+pub fn init_for_tests(cx: &mut App, dir: &std::path::Path, settings: crate::settings::Settings) {
     let mut registry = PluginRegistry::new();
     registry.register(Arc::new(tl_ssh::SshPlugin));
     registry.register(Arc::new(tl_s3::S3Plugin));
@@ -168,15 +138,18 @@ pub fn init_for_tests(cx: &mut App, dir: &std::path::Path, settings: Settings) {
         askpass: None,
         runtime_dir: dir.to_path_buf(),
     };
+    let mut store = SettingsStore::load(dir.join("settings.json"));
+    *store = settings;
     cx.set_global(AppState {
         registry,
         bookmarks: BookmarkStore::load(dir.join("bookmarks.json")),
         connections: Vec::new(),
         env,
         bridge,
-        settings,
+        settings: store,
         clipboard: None,
         main_window: None,
+        settings_window: None,
         _askpass: None,
     });
 }

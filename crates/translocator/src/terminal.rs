@@ -5,18 +5,22 @@
 //! many, so we try the user's `$TERMINAL`, then the Debian/Fedora
 //! alternatives, then the emulators people actually run — each with the
 //! flag it uses to take a command.
+//!
+//! The settings can name one, which comes before all of that: on macOS an
+//! application for `open -a`, elsewhere a program on `$PATH`.
 
 use std::io;
 use std::path::Path;
 use std::process::Command;
 
 /// Opens a terminal window: in `cwd`, running `argv` if given (otherwise a
-/// login shell).
-pub fn open(cwd: Option<&Path>, argv: Option<&[String]>) -> io::Result<()> {
+/// login shell). `preferred` is the terminal from the settings, if any.
+pub fn open(cwd: Option<&Path>, argv: Option<&[String]>, preferred: Option<&str>) -> io::Result<()> {
+    let preferred = preferred.map(str::trim).filter(|t| !t.is_empty());
     #[cfg(target_os = "macos")]
-    return macos::open(cwd, argv);
+    return macos::open(cwd, argv, preferred);
     #[cfg(not(target_os = "macos"))]
-    return unix::open(cwd, argv);
+    return unix::open(cwd, argv, preferred);
 }
 
 #[cfg(target_os = "macos")]
@@ -24,9 +28,13 @@ mod macos {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
 
-    pub fn open(cwd: Option<&Path>, argv: Option<&[String]>) -> io::Result<()> {
+    pub fn open(
+        cwd: Option<&Path>,
+        argv: Option<&[String]>,
+        app: Option<&str>,
+    ) -> io::Result<()> {
         let mut cmd = Command::new("open");
-        cmd.args(["-a", "Terminal"]);
+        cmd.args(["-a", app.unwrap_or("Terminal")]);
         match argv {
             // Terminal.app takes a file to run, not a command line.
             Some(argv) => cmd.arg(script_for(argv, cwd)?),
@@ -85,8 +93,14 @@ mod unix {
         ("xterm", "-e"),
     ];
 
-    pub fn open(cwd: Option<&Path>, argv: Option<&[String]>) -> io::Result<()> {
-        let preferred = std::env::var("TERMINAL").ok().filter(|t| !t.is_empty());
+    pub fn open(
+        cwd: Option<&Path>,
+        argv: Option<&[String]>,
+        preferred: Option<&str>,
+    ) -> io::Result<()> {
+        let preferred = preferred
+            .map(str::to_string)
+            .or_else(|| std::env::var("TERMINAL").ok().filter(|t| !t.is_empty()));
         let candidates = preferred
             .as_deref()
             .map(|t| (t, flag_for(t)))

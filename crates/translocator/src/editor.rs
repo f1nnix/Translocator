@@ -191,7 +191,7 @@ impl EditorView {
                 .unwrap_or(true)
         });
         subs.push(cx.observe_window_appearance(window, |_, window, cx| {
-            gpui_kit::component::Theme::sync_system_appearance(Some(window), cx);
+            crate::themes::apply(Some(window), cx);
         }));
         state.update(cx, |s, cx| s.focus(window, cx));
         EditorView {
