@@ -7629,7 +7629,7 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tl-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "dirs 6.0.0",
  "libc",
@@ -7646,7 +7646,7 @@ dependencies = [
 
 [[package]]
 name = "tl-local"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "filetime",
  "flate2",
@@ -7662,7 +7662,7 @@ dependencies = [
 
 [[package]]
 name = "tl-s3"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "aws-config",
  "aws-credential-types",
@@ -7680,7 +7680,7 @@ dependencies = [
 
 [[package]]
 name = "tl-ssh"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "libc",
@@ -7694,7 +7694,7 @@ dependencies = [
 
 [[package]]
 name = "tl-webdav"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -7931,7 +7931,7 @@ dependencies = [
 
 [[package]]
 name = "translocator"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "chrono",
  "dirs 6.0.0",
