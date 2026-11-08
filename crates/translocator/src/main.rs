@@ -69,11 +69,12 @@ fn main() {
             app_state::init(cx);
             themes::register(cx);
             themes::apply(None, cx);
+            // Quit, Hide, Settings and the rest belong to no window, so
+            // they are handled here and bound before the key map.
+            actions::handle_system_actions(cx);
+            actions::bind_system_keys(cx);
             // Builds the key map from the settings, and the menus from it.
             keymap::apply(cx);
-            cx.on_action(|_: &actions::Quit, cx: &mut App| cx.quit());
-            // Bound without a context, so ⌘, works from any window.
-            cx.on_action(|_: &actions::OpenSettings, cx: &mut App| settings_window::open(cx));
 
             let options = WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1280.), px(820.)), cx)),

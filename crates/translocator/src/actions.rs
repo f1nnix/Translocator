@@ -86,6 +86,16 @@ actions!(
         ToggleConsole,
         OpenSettings,
         Quit,
+        // What the desktop expects of an application, rather than of a
+        // file manager. See `system` below.
+        About,
+        OpenHelp,
+        Hide,
+        HideOthers,
+        ShowAll,
+        Minimize,
+        Zoom,
+        ToggleFullScreen,
         // Editor window.
         SaveFile,
         CloseEditor,
@@ -108,17 +118,86 @@ pub const EDITOR: &str = "EditorWindow";
 /// Key context of the command line under the panes.
 pub const COMMAND_LINE: &str = "CommandLine";
 
+/// Where the Help menu sends people: the README is the documentation.
+pub const HELP_URL: &str = env!("CARGO_PKG_REPOSITORY");
+
+/// The commands a desktop expects of any application, wired to the
+/// platform. The rest of the application's actions are handled by the
+/// window that can carry them out; these belong to no window, or to
+/// whichever one is in front.
+pub fn handle_system_actions(cx: &mut App) {
+    cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+    cx.on_action(|_: &OpenSettings, cx: &mut App| crate::settings_window::open(cx));
+    cx.on_action(|_: &OpenHelp, cx: &mut App| cx.open_url(HELP_URL));
+    cx.on_action(|_: &Hide, cx: &mut App| cx.hide());
+    cx.on_action(|_: &HideOthers, cx: &mut App| cx.hide_other_apps());
+    cx.on_action(|_: &ShowAll, cx: &mut App| cx.unhide_other_apps());
+    cx.on_action(|_: &Minimize, cx: &mut App| in_front(cx, |window| window.minimize_window()));
+    cx.on_action(|_: &Zoom, cx: &mut App| in_front(cx, |window| window.zoom_window()));
+    cx.on_action(|_: &ToggleFullScreen, cx: &mut App| {
+        in_front(cx, |window| window.toggle_fullscreen())
+    });
+    cx.on_action(|_: &About, cx: &mut App| {
+        if let Some(handle) = cx.active_window() {
+            let _ = handle.update(cx, |_, window, cx| crate::dialogs::about(window, cx));
+        }
+    });
+}
+
+/// Runs `act` on the window in front, if there is one. A command from the
+/// menu bar arrives with no window of its own.
+fn in_front(cx: &mut App, act: impl FnOnce(&mut Window)) {
+    if let Some(handle) = cx.active_window() {
+        let _ = handle.update(cx, |_, window, _| act(window));
+    }
+}
+
+/// The keys macOS puts these on. They are deliberately not in
+/// [`crate::keymap`]'s table: ⌘H and ⌘M belong to the system rather than to
+/// this application, and an application that let you rebind them would be
+/// the odd one out. Bound before the key map, so a key the user does assign
+/// to something else still wins.
+#[cfg(target_os = "macos")]
+pub fn bind_system_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-h", Hide, None),
+        KeyBinding::new("cmd-alt-h", HideOthers, None),
+        KeyBinding::new("cmd-m", Minimize, None),
+        KeyBinding::new("ctrl-cmd-f", ToggleFullScreen, None),
+    ]);
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn bind_system_keys(_cx: &mut App) {}
+
 /// The application menu bar. [`crate::keymap::apply`] sets it after the key
 /// map, so every item shows the key it actually answers to.
 pub fn set_menus(cx: &mut App) {
-    cx.set_menus([
-        Menu::new("Translocator").items([
-            MenuItem::action("Settings…", OpenSettings),
+    // The first menu is the application menu, and macOS expects a
+    // particular set of commands in it. Elsewhere there is no such
+    // convention, and no system to hide the application behind.
+    let mut app_menu = vec![
+        MenuItem::action("About Translocator", About),
+        MenuItem::separator(),
+        MenuItem::action("Settings…", OpenSettings),
+    ];
+    if cfg!(target_os = "macos") {
+        app_menu.extend([
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
-            MenuItem::action("Quit Translocator", Quit),
-        ]),
+            MenuItem::action("Hide Translocator", Hide),
+            MenuItem::action("Hide Others", HideOthers),
+            MenuItem::action("Show All", ShowAll),
+        ]);
+    }
+    app_menu.extend([
+        MenuItem::separator(),
+        MenuItem::action("Quit Translocator", Quit),
+    ]);
+
+    cx.set_menus([
+        Menu::new("Translocator").items(app_menu),
         Menu::new("File").items([
             MenuItem::action("New Tab", NewTab),
             MenuItem::action("New Folder", NewFolder),
@@ -177,6 +256,8 @@ pub fn set_menus(cx: &mut App) {
             MenuItem::separator(),
             MenuItem::action("Jobs", ToggleJobs),
             MenuItem::action("Console", ToggleConsole),
+            MenuItem::separator(),
+            MenuItem::action("Enter Full Screen", ToggleFullScreen),
         ]),
         Menu::new("Connection").items([
             MenuItem::action("Save This Folder", TogglePlace),
@@ -196,5 +277,14 @@ pub fn set_menus(cx: &mut App) {
             MenuItem::action("Mark by Mask…", MarkByMask),
             MenuItem::action("Unmark by Mask…", UnmarkByMask),
         ]),
+        // Named "Window" so macOS takes it over: it adds the list of open
+        // windows, and the marks that say which one is in front.
+        Menu::new("Window").items([
+            MenuItem::action("Minimize", Minimize),
+            MenuItem::action("Zoom", Zoom),
+        ]),
+        // Named "Help" for the same reason: macOS puts its search field at
+        // the top of the menu it finds under that name.
+        Menu::new("Help").items([MenuItem::action("Translocator Help", OpenHelp)]),
     ]);
 }

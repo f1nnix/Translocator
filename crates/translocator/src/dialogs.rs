@@ -70,6 +70,47 @@ impl<T: 'static> Reply<T> {
     }
 }
 
+/// The panel behind the application menu's first item: what this is, which
+/// version, and where to read about it.
+pub fn about(window: &mut Window, cx: &mut App) {
+    window.open_dialog(cx, |dialog, _window, cx| {
+        let theme = cx.theme().clone();
+        dialog
+            .title("Translocator")
+            .width(px(420.))
+            .child(
+                v_flex()
+                    .gap_2()
+                    .text_sm()
+                    .child(
+                        div()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("Version {}", env!("CARGO_PKG_VERSION"))),
+                    )
+                    .child(div().whitespace_normal().child(env!("CARGO_PKG_DESCRIPTION")))
+                    .child(
+                        div()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("MIT licensed · {}", crate::actions::HELP_URL)),
+                    ),
+            )
+            .footer(
+                DialogFooter::new()
+                    .child(
+                        Button::new("about-help")
+                            .label("Open the README")
+                            .on_click(|_, _, cx| cx.open_url(crate::actions::HELP_URL)),
+                    )
+                    .child(
+                        Button::new("about-close")
+                            .label("Close")
+                            .primary()
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    ),
+            )
+    });
+}
+
 fn message_block(text: SharedString, cx: &App) -> impl IntoElement {
     div()
         .text_sm()

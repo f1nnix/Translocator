@@ -53,6 +53,10 @@ fn open(cx: &mut TestAppContext, build: impl FnOnce(&Path)) -> Fixture {
         gpui_kit::init(cx);
         app_state::init_for_tests(cx, &state, settings);
         crate::themes::register(cx);
+        // The same order `main` starts in, so a test sees the key map and
+        // the menus the application really has.
+        crate::actions::handle_system_actions(cx);
+        crate::actions::bind_system_keys(cx);
         crate::keymap::apply(cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds {
@@ -1192,4 +1196,71 @@ fn a_folder_that_changes_mid_listing_still_lands_the_cursor(cx: &mut TestAppCont
         Some("target.txt"),
         "the second listing dropped the cursor the first was asked to place"
     );
+}
+
+/// The labels of the actions in a menu, submenus left out.
+fn menu_labels(menu: &gpui::OwnedMenu) -> Vec<String> {
+    menu.items
+        .iter()
+        .filter_map(|item| match item {
+            gpui::OwnedMenuItem::Action { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[gpui::test]
+fn the_menu_bar_carries_what_the_desktop_expects(cx: &mut TestAppContext) {
+    let _f = open(cx, |_| {});
+    let menus = cx.update(|cx| cx.get_menus()).expect("the menu bar is set");
+    let names: Vec<String> = menus.iter().map(|menu| menu.name.to_string()).collect();
+
+    // macOS takes over the menu it finds under each of these names: the
+    // list of open windows goes in one, its help search field in the other.
+    assert_eq!(names.first().map(String::as_str), Some("Translocator"));
+    assert!(names.contains(&"Window".to_string()), "{names:?}");
+    assert!(names.contains(&"Help".to_string()), "{names:?}");
+
+    let app_menu = menu_labels(&menus[0]);
+    for item in ["About Translocator", "Settings…", "Quit Translocator"] {
+        assert!(app_menu.contains(&item.to_string()), "{app_menu:?}");
+    }
+    // Hiding is a macOS idea, and there is nothing to hide behind elsewhere.
+    for item in ["Hide Translocator", "Hide Others", "Show All"] {
+        assert_eq!(
+            app_menu.contains(&item.to_string()),
+            cfg!(target_os = "macos"),
+            "{item} in {app_menu:?}"
+        );
+    }
+
+    let window = menus.iter().find(|menu| menu.name == "Window").unwrap();
+    assert_eq!(menu_labels(window), ["Minimize", "Zoom"]);
+    let help = menus.iter().find(|menu| menu.name == "Help").unwrap();
+    assert_eq!(menu_labels(help), ["Translocator Help"]);
+}
+
+#[gpui::test]
+fn the_system_keys_are_bound_where_macos_expects_them(cx: &mut TestAppContext) {
+    let _f = open(cx, |_| {});
+    let bound = |cx: &mut TestAppContext, keys: &str| {
+        cx.update(|cx| {
+            let stroke = vec![gpui::Keystroke::parse(keys).unwrap()];
+            cx.all_bindings_for_input(&stroke)
+                .iter()
+                .map(|binding| binding.action().name().to_string())
+                .collect::<Vec<_>>()
+        })
+    };
+    if cfg!(target_os = "macos") {
+        assert!(bound(cx, "cmd-h").contains(&"tl::Hide".to_string()));
+        assert!(bound(cx, "cmd-alt-h").contains(&"tl::HideOthers".to_string()));
+        assert!(bound(cx, "cmd-m").contains(&"tl::Minimize".to_string()));
+    } else {
+        assert!(bound(cx, "cmd-h").is_empty(), "hiding is a macOS idea");
+    }
+    // And they take none of the keys the file manager already uses.
+    for (keys, action) in [("cmd-shift-h", "tl::GoHome"), ("cmd-shift-m", "tl::MultiRename")] {
+        assert!(bound(cx, keys).contains(&action.to_string()), "{keys} lost {action}");
+    }
 }

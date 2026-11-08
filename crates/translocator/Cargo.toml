@@ -1,6 +1,7 @@
 [package]
 name = "translocator"
 description = "Dual-pane file manager with an SSH command-protocol provider"
+repository = "https://github.com/f1nnix/Translocator"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
