@@ -1058,3 +1058,27 @@ fn the_settings_window_opens_once_and_draws(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(cx.update(|cx| cx.windows().len()), before + 1);
 }
+
+#[gpui::test]
+fn a_folder_that_changes_mid_listing_still_lands_the_cursor(cx: &mut TestAppContext) {
+    let f = open(cx, |root| {
+        write(&root.join("left/a.txt"), "a", 1);
+        write(&root.join("left/target.txt"), "t", 1);
+    });
+    f.select(cx, "a.txt");
+
+    let pane = f.pane(cx, Side::Left);
+    let dir = cx.update(|cx| pane.read(cx).location().path.clone());
+    cx.update(|cx| pane.update(cx, |p, cx| p.navigate(dir, Some(b"target.txt".to_vec()), cx)));
+    // The folder changes before that listing comes back — a job finishing,
+    // or anything else the watcher sees — and the listing starts again.
+    f.dispatch(cx, Refresh);
+
+    f.settle(cx, "the listing", |ws, cx| !ws.pane(Side::Left).read(cx).is_loading());
+    let cursor = cx.update(|cx| pane.read(cx).cursor_row().map(|r| r.name.to_string()));
+    assert_eq!(
+        cursor.as_deref(),
+        Some("target.txt"),
+        "the second listing dropped the cursor the first was asked to place"
+    );
+}

@@ -264,6 +264,10 @@ pub struct TabState {
     /// Only the entries whose name matches this are listed; empty lists
     /// everything. One per tab, so each tab keeps its own.
     filter: String,
+    /// The entry a caller asked to put the cursor on, until a listing has
+    /// managed to. A folder that changes while it is being listed is listed
+    /// again, and the request has to outlive the listing it was made with.
+    pending_select: Option<Vec<u8>>,
     sort: Sort,
     pub elevated: bool,
     loading: bool,
@@ -288,6 +292,7 @@ impl TabState {
             anchor: 0,
             marked: HashSet::new(),
             filter: String::new(),
+            pending_select: None,
             sort,
             elevated,
             loading: false,
@@ -305,6 +310,7 @@ impl TabState {
 
     /// Forgets what was shown for the previous folder.
     fn reset_view(&mut self) {
+        self.pending_select = None;
         self.marked.clear();
         self.dir_sizes.clear();
         self.error = None;
@@ -568,6 +574,9 @@ impl FilePane {
     /// (Re)loads tab `ix`, putting the cursor on `select` if given.
     fn load(&mut self, ix: usize, select: Option<Vec<u8>>, cx: &mut Context<Self>) {
         let tab = &mut self.tabs[ix];
+        if select.is_some() {
+            tab.pending_select = select;
+        }
         tab.loading = true;
         let vfs = tab.loc.vfs.clone();
         let path = tab.loc.path.clone();
@@ -595,6 +604,9 @@ impl FilePane {
                     Ok(entries) => {
                         tab.raw = entries;
                         tab.error = None;
+                        // This listing supersedes any earlier one, so it
+                        // owes the cursor to whoever asked last.
+                        let select = tab.pending_select.take();
                         this.rebuild_rows(ix, select.as_deref());
                         this.watch(ix, cx);
                     }
@@ -696,6 +708,7 @@ impl FilePane {
             tab.loc.path = path;
             tab.back.push(old);
             tab.forward.clear();
+            tab.pending_select = None;
             tab.marked.clear();
             tab.dir_sizes.clear();
             tab.error = None;
