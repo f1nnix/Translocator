@@ -86,8 +86,14 @@ fn open(cx: &mut TestAppContext, build: impl FnOnce(&Path)) -> Fixture {
 impl Fixture {
     /// Draws, runs the UI and the worker threads until `done` holds. The
     /// test clock moves on too, so animations and timers complete.
+    ///
+    /// It gives up on the clock rather than after a number of turns: the
+    /// work being waited for runs on real threads against real files, and a
+    /// machine with every core busy takes longer to do the same amount of
+    /// it. Counting turns made that look like a hung test.
     fn settle(&self, cx: &mut TestAppContext, what: &str, mut done: impl FnMut(&Workspace, &App) -> bool) {
-        for _ in 0..2000 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
             self.draw(cx);
             cx.executor().advance_clock(Duration::from_millis(20));
             cx.run_until_parked();
@@ -95,9 +101,34 @@ impl Fixture {
             if cx.update(|cx| done(ws.read(cx), cx)) {
                 return;
             }
+            if std::time::Instant::now() >= deadline {
+                panic!("timed out waiting for {what}\n{}", self.snapshot(cx));
+            }
             std::thread::sleep(Duration::from_millis(5));
         }
-        panic!("timed out waiting for {what}");
+    }
+
+
+    /// Both panes as they stand, printed when a wait gives up: what a
+    /// stuck test was actually looking at.
+    fn snapshot(&self, cx: &mut TestAppContext) -> String {
+        let ws = self.ws.clone();
+        cx.update(|cx| {
+            let ws = ws.read(cx);
+            let mut out = format!("active: {:?}\n", ws.active_side());
+            for side in [Side::Left, Side::Right] {
+                let pane = ws.pane(side).read(cx);
+                out.push_str(&format!(
+                    "{side:?}: {} · {} rows · cursor {:?} · loading {} · in archive {}\n",
+                    pane.location().display(),
+                    pane.listed_entries().len(),
+                    pane.cursor_row().map(|r| r.name.to_string()),
+                    pane.is_loading(),
+                    pane.location().vfs.host().is_some(),
+                ));
+            }
+            out
+        })
     }
 
     fn draw(&self, cx: &mut TestAppContext) {
