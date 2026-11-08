@@ -194,7 +194,7 @@ impl Drop for Master {
 
 pub fn classify_connect_error(stderr: &str, code: Option<i32>) -> VfsError {
     let lower = stderr.to_ascii_lowercase();
-    let msg = if stderr.is_empty() {
+    let mut msg = if stderr.is_empty() {
         format!("ssh exited with status {}", code.unwrap_or(-1))
     } else {
         stderr.to_string()
@@ -204,9 +204,59 @@ pub fn classify_connect_error(stderr: &str, code: Option<i32>) -> VfsError {
         || lower.contains("too many authentication failures")
         || lower.contains("no more authentication methods")
     {
-        VfsError::Auth(msg)
-    } else {
-        VfsError::Connection(msg)
+        return VfsError::Auth(msg);
+    }
+    if let Some(hint) = local_network_hint(&lower) {
+        msg.push_str(hint);
+    }
+    VfsError::Connection(msg)
+}
+
+/// macOS asks an application for permission before it may reach the local
+/// network and, until that is granted, fails the connection with
+/// `EHOSTUNREACH` — which `ssh` reports as "No route to host". The same
+/// server answers from a terminal, so the bare message sends you looking at
+/// the network instead of at System Settings.
+#[cfg(target_os = "macos")]
+fn local_network_hint(lower: &str) -> Option<&'static str> {
+    let unreachable =
+        lower.contains("no route to host") || lower.contains("network is unreachable");
+    (unreachable && names_local_host(lower)).then_some(
+        "\n\nThe server is on your local network, and macOS only lets an application \
+         reach it with permission. Check System Settings \u{2192} Privacy & Security \
+         \u{2192} Local Network, and switch Translocator on.",
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn local_network_hint(_lower: &str) -> Option<&'static str> {
+    None
+}
+
+/// The address in ssh's own "connect to host H port N: ..." line, when it is
+/// one of the private ranges macOS gates.
+#[cfg(target_os = "macos")]
+fn names_local_host(lower: &str) -> bool {
+    lower
+        .split("connect to host ")
+        .skip(1)
+        .filter_map(|rest| rest.split_whitespace().next())
+        .any(is_local_address)
+}
+
+#[cfg(target_os = "macos")]
+fn is_local_address(host: &str) -> bool {
+    use std::net::IpAddr;
+    if host.ends_with(".local") {
+        return true;
+    }
+    match host.parse::<IpAddr>() {
+        Ok(IpAddr::V4(ip)) => ip.is_private() || ip.is_link_local() || ip.is_loopback(),
+        Ok(IpAddr::V6(ip)) => {
+            let first = ip.segments()[0];
+            ip.is_loopback() || first & 0xffc0 == 0xfe80 || first & 0xfe00 == 0xfc00
+        }
+        Err(_) => false,
     }
 }
 
@@ -235,6 +285,37 @@ mod tests {
         let status = child.wait().unwrap();
         assert!(started.elapsed() < Duration::from_secs(3));
         assert!(!status.success());
+    }
+
+    #[test]
+    fn a_server_on_the_lan_points_at_the_privacy_setting() {
+        // macOS refuses an ungranted application the local network, and ssh
+        // can only report what connect(2) told it.
+        let text = "ssh: connect to host 192.168.2.6 port 2222: No route to host";
+        let VfsError::Connection(msg) = classify_connect_error(text, Some(255)) else {
+            panic!("a dead connection is not an authentication problem");
+        };
+        assert!(msg.starts_with(text), "{msg}");
+        if cfg!(target_os = "macos") {
+            assert!(msg.contains("Local Network"), "{msg}");
+        } else {
+            assert_eq!(msg, text);
+        }
+    }
+
+    #[test]
+    fn a_server_on_the_internet_gets_no_hint() {
+        let text = "ssh: connect to host 93.184.216.34 port 22: No route to host";
+        let VfsError::Connection(msg) = classify_connect_error(text, Some(255)) else {
+            panic!("a dead connection is not an authentication problem");
+        };
+        assert_eq!(msg, text);
+    }
+
+    #[test]
+    fn a_refused_key_is_still_an_authentication_problem() {
+        let text = "ssh: Permission denied (publickey,password).";
+        assert!(matches!(classify_connect_error(text, Some(255)), VfsError::Auth(_)));
     }
 
     #[test]
