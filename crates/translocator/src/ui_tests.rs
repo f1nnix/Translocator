@@ -108,7 +108,6 @@ impl Fixture {
         }
     }
 
-
     /// Both panes as they stand, printed when a wait gives up: what a
     /// stuck test was actually looking at.
     fn snapshot(&self, cx: &mut TestAppContext) -> String {
@@ -241,6 +240,21 @@ impl Fixture {
                 .map(|e| String::from_utf8_lossy(&e.name).into_owned())
                 .collect()
         })
+    }
+
+    /// What quick look is showing, once it has settled on a file.
+    fn preview(&self, cx: &mut TestAppContext) -> crate::quick_look::Preview {
+        self.settle(cx, "the preview to be read", |ws, cx| {
+            ws.quick_look()
+                .is_some_and(|view| view.read(cx).preview(cx) != crate::quick_look::Preview::Reading)
+        });
+        let ws = self.ws.clone();
+        cx.update(|cx| ws.read(cx).quick_look().unwrap().read(cx).preview(cx))
+    }
+
+    fn preview_name(&self, cx: &mut TestAppContext) -> Option<String> {
+        let ws = self.ws.clone();
+        cx.update(|cx| ws.read(cx).quick_look()?.read(cx).preview_name())
     }
 
     fn dialog_open(&self, cx: &mut TestAppContext) -> bool {
@@ -1057,6 +1071,103 @@ fn the_settings_window_opens_once_and_draws(cx: &mut TestAppContext) {
     cx.update(|cx| crate::settings_window::open(cx));
     cx.run_until_parked();
     assert_eq!(cx.update(|cx| cx.windows().len()), before + 1);
+}
+
+#[gpui::test]
+fn quick_look_previews_what_the_cursor_is_on(cx: &mut TestAppContext) {
+    use crate::quick_look::Preview;
+
+    let f = open(cx, |root| {
+        write(&root.join("left/notes.txt"), "the quick brown fox\n", 1);
+        write(&root.join("left/zzz.bin"), "head\0tail", 1);
+        write(&root.join("left/sub/inner.txt"), "inner", 1);
+    });
+    f.select(cx, "notes.txt");
+    assert!(cx.update(|cx| f.ws.read(cx).quick_look_side()).is_none());
+
+    f.dispatch(cx, ToggleQuickLook);
+    // The preview takes the pane opposite the one with the keyboard.
+    assert_eq!(cx.update(|cx| f.ws.read(cx).quick_look_side()), Some(Side::Right));
+    assert_eq!(f.preview_name(cx).as_deref(), Some("notes.txt"));
+    assert_eq!(f.preview(cx), Preview::Text("the quick brown fox\n".into()));
+
+    // It follows the cursor, and says what it cannot show.
+    f.select(cx, "zzz.bin");
+    assert_eq!(f.preview(cx), Preview::Note("Binary file".into()));
+    f.select(cx, "sub");
+    assert_eq!(f.preview(cx), Preview::Note("Folder".into()));
+
+    // Walking into a folder keeps the mode, and the preview follows. The
+    // cursor lands on the row above the folder, which has nothing to show.
+    f.keys(cx, "enter");
+    f.settle(cx, "the folder to open", |ws, cx| {
+        let pane = ws.pane(Side::Left).read(cx);
+        !pane.is_loading() && pane.listed_entries().iter().any(|e| e.name == b"inner.txt")
+    });
+    assert_eq!(f.preview(cx), Preview::Nothing);
+    f.keys(cx, "down");
+    assert_eq!(f.preview_name(cx).as_deref(), Some("inner.txt"));
+    assert_eq!(f.preview(cx), Preview::Text("inner".into()));
+    assert_eq!(cx.update(|cx| f.ws.read(cx).quick_look_side()), Some(Side::Right));
+
+    // And ⌘Y again gives the pane back.
+    f.dispatch(cx, ToggleQuickLook);
+    assert!(cx.update(|cx| f.ws.read(cx).quick_look_side()).is_none());
+}
+
+#[gpui::test]
+fn quick_look_moves_to_the_other_side_with_the_keyboard(cx: &mut TestAppContext) {
+    use crate::quick_look::Preview;
+
+    let f = open(cx, |root| {
+        write(&root.join("left/left.txt"), "on the left", 1);
+        write(&root.join("right/right.txt"), "on the right", 1);
+    });
+    f.select(cx, "left.txt");
+    f.dispatch(cx, ToggleQuickLook);
+    assert_eq!(cx.update(|cx| f.ws.read(cx).quick_look_side()), Some(Side::Right));
+    assert_eq!(f.preview(cx), Preview::Text("on the left".into()));
+
+    // Tab hands the keyboard to the other folder; the preview changes
+    // sides with it rather than leaving the pane it was in undrawn.
+    f.keys(cx, "tab");
+    f.settle(cx, "the right pane to take the keyboard", |ws, _| {
+        ws.active_side() == Side::Right
+    });
+    assert_eq!(cx.update(|cx| f.ws.read(cx).quick_look_side()), Some(Side::Left));
+    // The right pane's cursor starts on the row above the folder, so the
+    // preview empties rather than keeping the file from the other side.
+    assert_eq!(f.preview(cx), Preview::Nothing);
+    f.keys(cx, "down");
+    assert_eq!(f.preview(cx), Preview::Text("on the right".into()));
+
+    // The file list still has the keys: marking works where the cursor is.
+    f.dispatch(cx, ToggleMark);
+    assert_eq!(f.names(cx, Side::Right, true), ["right.txt"]);
+}
+
+#[gpui::test]
+fn quick_look_reads_an_image_as_an_image(cx: &mut TestAppContext) {
+    use crate::quick_look::Preview;
+
+    // The smallest PNG that decodes: a single transparent pixel.
+    const PIXEL: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
+        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    let f = open(cx, |root| {
+        fs::write(root.join("left/dot.png"), PIXEL).unwrap();
+        fs::write(root.join("left/empty.txt"), "").unwrap();
+    });
+    f.select(cx, "dot.png");
+    f.dispatch(cx, ToggleQuickLook);
+    assert_eq!(f.preview(cx), Preview::Image(PIXEL.len()));
+
+    f.select(cx, "empty.txt");
+    assert_eq!(f.preview(cx), Preview::Note("Empty file".into()));
 }
 
 #[gpui::test]

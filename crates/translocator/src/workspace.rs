@@ -28,6 +28,7 @@ use crate::jobs::{JobStatus, Jobs};
 use crate::keymap::shortcut;
 use crate::pane::{DraggedFiles, FilePane, Location, PaneEvent, Side, tilde};
 use crate::properties;
+use crate::quick_look::QuickLook;
 use crate::settings::AppearanceMode;
 use crate::util::blocking;
 
@@ -44,6 +45,9 @@ pub struct Workspace {
     console: Entity<EditorState>,
     console_text: String,
     show_console: bool,
+    /// Quick look, while it is on: it takes the place of the pane opposite
+    /// the one with the keyboard.
+    quick_look: Option<Entity<QuickLook>>,
     _subs: Vec<Subscription>,
 }
 
@@ -99,6 +103,7 @@ impl Workspace {
             console,
             console_text: String::new(),
             show_console: false,
+            quick_look: None,
             _subs: subs,
         }
     }
@@ -152,6 +157,7 @@ impl Workspace {
         match event {
             PaneEvent::Focused => {
                 self.active = side;
+                self.sync_quick_look(window, cx);
                 self.update_title(window, cx);
                 cx.notify();
             }
@@ -1521,8 +1527,43 @@ impl Workspace {
     // ----- panes ----------------------------------------------------------
 
     fn switch_pane(&mut self, _: &SwitchPane, window: &mut Window, cx: &mut Context<Self>) {
-        let target = self.other_pane().read(cx).focus.clone();
+        // The active side is set here rather than left to the focus event:
+        // with quick look on, the other pane is only drawn once `active`
+        // says so, and a focus handle that is not drawn never reports back.
+        let side = self.active.other();
+        self.active = side;
+        self.sync_quick_look(window, cx);
+        let target = self.pane(side).read(cx).focus.clone();
         window.focus(&target, cx);
+        cx.notify();
+    }
+
+    /// Turns quick look on or off. The file list keeps the keyboard either
+    /// way; all that changes is what the other pane draws.
+    fn toggle_quick_look(&mut self, _: &ToggleQuickLook, window: &mut Window, cx: &mut Context<Self>) {
+        if self.quick_look.take().is_none() {
+            self.quick_look = Some(cx.new(|_| QuickLook::new()));
+            self.sync_quick_look(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Points the preview at the pane that has the keyboard.
+    fn sync_quick_look(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(view) = self.quick_look.clone() else { return };
+        let pane = self.active_pane().clone();
+        view.update(cx, |view, cx| view.watch(pane, window, cx));
+    }
+
+    /// Which side shows the preview, for the tests.
+    #[cfg(test)]
+    pub(crate) fn quick_look_side(&self) -> Option<Side> {
+        self.quick_look.as_ref().map(|_| self.active.other())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn quick_look(&self) -> Option<&Entity<QuickLook>> {
+        self.quick_look.as_ref()
     }
 
     fn focus_pane(&mut self, _: &FocusPane, window: &mut Window, cx: &mut Context<Self>) {
@@ -1951,6 +1992,15 @@ impl Workspace {
         )
     }
 
+    /// What a side draws: its file list, or the preview when quick look is
+    /// on and the keyboard is on the other side.
+    fn side_view(&self, side: Side) -> AnyElement {
+        match &self.quick_look {
+            Some(view) if side != self.active => view.clone().into_any_element(),
+            _ => self.pane(side).clone().into_any_element(),
+        }
+    }
+
     fn render_title(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let running = self.jobs.read(cx).running();
@@ -2050,6 +2100,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::focus_pane))
             .on_action(cx.listener(Self::swap_panes))
             .on_action(cx.listener(Self::mirror_pane))
+            .on_action(cx.listener(Self::toggle_quick_look))
             .on_action(cx.listener(Self::toggle_hidden))
             .on_action(cx.listener(Self::toggle_sudo))
             .on_action(cx.listener(Self::disconnect_action))
@@ -2065,8 +2116,8 @@ impl Render for Workspace {
                 div().flex_1().min_h_0().child(
                     h_resizable("panes")
                         .with_state(&self.split)
-                        .child(resizable_panel().child(self.left.clone()))
-                        .child(resizable_panel().child(self.right.clone())),
+                        .child(resizable_panel().child(self.side_view(Side::Left)))
+                        .child(resizable_panel().child(self.side_view(Side::Right))),
                 ),
             )
             .when(self.show_console, |el| {

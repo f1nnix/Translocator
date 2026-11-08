@@ -11,6 +11,7 @@ mod jobs;
 mod keymap;
 mod pane;
 mod properties;
+mod quick_look;
 mod rename;
 mod settings;
 mod settings_window;

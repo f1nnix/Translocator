@@ -133,6 +133,7 @@ pub static COMMANDS: &[Command] = commands! {
         ("switch-pane", "Other pane", Some(PANE), ["tab"], SwitchPane),
         ("swap-panes", "Swap the panes", Some(WORKSPACE), ["cmd-u"], SwapPanes),
         ("mirror-pane", "Same folder in the other pane", Some(PANE), ["cmd-="], MirrorPane),
+        ("quick-look", "Quick look at the file under the cursor", Some(WORKSPACE), ["cmd-y"], ToggleQuickLook),
     ],
     "Saved folders" => [
         ("toggle-place", "Save or forget this folder", Some(PANE), ["cmd-d"], TogglePlace),
