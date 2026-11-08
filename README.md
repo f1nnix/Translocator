@@ -11,7 +11,9 @@
 - **Providers** — local disks, SSH servers ([read below](#-ssh-provider)), S3 accounts and WebDAV shares, any of them in either pane.
 - **Bookmarks per host** — every server, every account and this machine keeps its own row of folders under the pane. ⌘D saves the one you are in, ⌘1 … ⌘9 jump.
 - **Advanced file operations** — copy and move with per-item conflict resolution, queued in the background. Compare and synchronize two folders, multi-rename from masks, compress and extract, open archives as folders, view and edit a file that lives on a server.
+- **Quick preview** — ⌘Y turns the other pane into a preview of whatever the cursor is on: text with its syntax colours, images, the details of everything else. The list keeps the keyboard, so you read as you walk through a folder.
 - **Everything from the keyboard** — type to filter the list, mark with Space, find files, check permissions and sizes, open a command line or a terminal in the folder you are looking at.
+- **Fully themable** — ten colour schemes, each with a light and a dark variant: Catppuccin, Dracula, Gruvbox, Nord, Solarized, Tokyo Night and more. Follows the system appearance, or stays on the one you pick.
 
 ## 🔐 SSH provider
 
