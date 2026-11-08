@@ -812,7 +812,7 @@ fn a_rebound_key_moves_the_command_and_the_old_key_goes_quiet(cx: &mut TestAppCo
     let f = open(cx, |root| write(&root.join("left/.hidden"), "h", 1));
     f.focus(cx, Side::Left);
 
-    assert_eq!(advertised(cx, &f, &ToggleHidden), ["cmd-shift-.", "cmd->"]);
+    assert_eq!(advertised(cx, &f, &ToggleHidden), as_spelled(["cmd-shift-.", "cmd->"]));
 
     // The default key works, and the file list follows it.
     f.keys(cx, "cmd-shift-.");
@@ -839,7 +839,7 @@ fn a_rebound_key_moves_the_command_and_the_old_key_goes_quiet(cx: &mut TestAppCo
 
     // Menus and tooltips look the binding up in GPUI's key map rather than
     // in the settings, so it has to agree about which key is gone.
-    assert_eq!(advertised(cx, &f, &ToggleHidden), ["f9"]);
+    assert_eq!(advertised(cx, &f, &ToggleHidden), as_spelled(["f9"]));
 
     // And the defaults come back.
     cx.update(|cx| {
@@ -850,6 +850,15 @@ fn a_rebound_key_moves_the_command_and_the_old_key_goes_quiet(cx: &mut TestAppCo
     assert!(!cx.update(|cx| hidden(cx)));
     f.keys(cx, "f9");
     assert!(!cx.update(|cx| hidden(cx)), "F9 is free again");
+}
+
+/// Keystrokes as this platform spells them: GPUI writes the same modifier
+/// as `cmd-` on macOS and `super-` on Linux, so a literal cannot be
+/// compared against what it hands back.
+fn as_spelled<const N: usize>(keys: [&str; N]) -> Vec<String> {
+    keys.iter()
+        .map(|keys| gpui::Keystroke::parse(keys).unwrap().unparse())
+        .collect()
 }
 
 /// The keys GPUI would show for an action in the pane's context, which is
