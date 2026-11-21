@@ -234,6 +234,7 @@ impl S3Vfs {
                     .put_object()
                     .bucket(bucket)
                     .key(key)
+                    .set_content_type(keys::content_type(key).map(str::to_string))
                     .body(ByteStream::from(data))
                     .send(),
             )

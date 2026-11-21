@@ -37,6 +37,17 @@ pub fn base_name(key: &str) -> &str {
     key.trim_end_matches('/').rsplit('/').next().unwrap_or(key)
 }
 
+/// The `Content-Type` an object should be stored with, guessed from the
+/// key's extension. Without it S3 falls back to `application/octet-stream`,
+/// and a browser then downloads an image instead of showing it. Folder
+/// markers and keys with no known extension get `None`.
+pub fn content_type(key: &str) -> Option<&'static str> {
+    if key.ends_with('/') {
+        return None;
+    }
+    mime_guess::from_path(base_name(key)).first_raw()
+}
+
 /// Percent-encodes a bucket/key pair for `x-amz-copy-source`, which must be
 /// URL-encoded while keeping the separators.
 pub fn copy_source(bucket: &str, key: &str) -> String {
@@ -100,6 +111,16 @@ mod tests {
         assert_eq!(base_name("a/b/c.txt"), "c.txt");
         assert_eq!(base_name("a/b/"), "b");
         assert_eq!(base_name("solo"), "solo");
+    }
+
+    #[test]
+    fn content_types_follow_the_extension() {
+        assert_eq!(content_type("a/photo.png"), Some("image/png"));
+        assert_eq!(content_type("a/Photo.JPG"), Some("image/jpeg"));
+        assert_eq!(content_type("site/index.html"), Some("text/html"));
+        assert_eq!(content_type("a.dir/README"), None);
+        assert_eq!(content_type("a/b.png/"), None);
+        assert_eq!(content_type("blob.unknownext"), None);
     }
 
     #[test]

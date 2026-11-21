@@ -7670,6 +7670,7 @@ dependencies = [
  "aws-smithy-http-client",
  "aws-smithy-types",
  "log",
+ "mime_guess",
  "tar",
  "tempfile",
  "tl-core",

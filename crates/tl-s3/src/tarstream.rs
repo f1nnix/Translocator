@@ -329,6 +329,7 @@ fn put(worker: &Worker, bucket: &str, key: &str, data: Vec<u8>) -> VfsResult<()>
                 .put_object()
                 .bucket(bucket)
                 .key(key)
+                .set_content_type(keys::content_type(key).map(str::to_string))
                 .body(ByteStream::from(data))
                 .send(),
         )
@@ -351,6 +352,7 @@ fn upload_parts(
                 .create_multipart_upload()
                 .bucket(bucket)
                 .key(key)
+                .set_content_type(keys::content_type(key).map(str::to_string))
                 .send(),
         )
         .map_err(|e| map_err(&format!("Cannot start upload of {bucket}/{key}"), e))?;
