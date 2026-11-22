@@ -1,10 +1,18 @@
-//! The settings window: General, Keys and Themes.
+//! The Settings window: General, Keys and Themes.
 //!
-//! Every control writes straight through to the settings file and takes
-//! effect at once — there is no OK button to forget to press — and each one
-//! can be put back to its default from the page's reset button.
+//! [`open`] is called by the shell ([`crate::app_state`]) whenever the core
+//! bumps `view.settings_requests` (the OpenSettings command: ⌘, the menu,
+//! the title bar button). There is only ever one settings window: a live
+//! handle in `Shell::settings_window` is activated, a dead one cleared.
+//!
+//! There is no OK button: every control sends its
+//! `Event::Settings(SettingsEdit::..)` at once, and each page's reset button
+//! puts what it shows back to the defaults. The settings drawn are the
+//! core's, as last rendered; the shell re-applies the key map and the theme
+//! when they change. Recording a key combination is this window's own
+//! state, and so is the note about a clash or an unusable key.
 
-use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use gpui_kit::assets::IconName as Lucide;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -12,40 +20,60 @@ use gpui_kit::component::setting::{
     NumberFieldOptions, RenderOptions, SettingField, SettingGroup, SettingItem, SettingPage,
     Settings as SettingsPanel,
 };
-use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, Sizable as _, TitleBar, h_flex, v_flex,
-};
+use gpui_kit::component::{ActiveTheme as _, Disableable as _, Icon, Sizable as _, TitleBar, h_flex, v_flex};
 use gpui_kit::{prelude::*, *};
+use tl_app::Event;
+use tl_app::model::SettingsEdit;
+use tl_app::settings::{
+    Appearance, AppearanceMode, DateFormat, FONT_SIZE, General, ROW_HEIGHT, Settings, SortKey,
+};
 
 use crate::actions::OpenSettings;
-use crate::app_state::AppState;
+use crate::app_state::{Shell, dispatch, view};
 use crate::keymap::{self, Command};
-use crate::pane::SortKey;
-use crate::settings::{self, AppearanceMode, DateFormat, FONT_SIZE, ROW_HEIGHT};
 use crate::themes;
 
 /// Opens the settings window, or brings the open one forward.
 pub fn open(cx: &mut App) {
-    if let Some(handle) = cx.global::<AppState>().settings_window {
+    if let Some(handle) = cx.global::<Shell>().settings_window {
         if handle.update(cx, |_, window, _| window.activate_window()).is_ok() {
             return;
         }
         // The window is gone without having said so; open a new one.
-        cx.global_mut::<AppState>().settings_window = None;
+        cx.global_mut::<Shell>().settings_window = None;
     }
+    let mut chrome = TitleBar::window_options();
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::centered(size(px(900.), px(640.)), cx)),
         window_min_size: Some(size(px(620.), px(420.))),
+        // The title bar drawn in the window, with "Settings" as the title the
+        // system shows (the window menu, the switcher).
         titlebar: Some(TitlebarOptions {
             title: Some("Settings".into()),
-            ..Default::default()
+            ..chrome.titlebar.take().unwrap_or_default()
         }),
-        ..TitleBar::window_options()
+        ..chrome
     };
     match gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| SettingsView::new(window, cx))) {
-        Ok((handle, _)) => cx.global_mut::<AppState>().settings_window = Some(handle),
+        Ok((handle, _)) => cx.global_mut::<Shell>().settings_window = Some(handle),
         Err(err) => log::error!("cannot open the settings window: {err}"),
     }
+}
+
+fn edit(edit: SettingsEdit, cx: &App) {
+    dispatch(Event::Settings(edit), cx);
+}
+
+fn settings(cx: &App) -> Arc<Settings> {
+    view(cx).settings.clone()
+}
+
+fn general(cx: &App) -> General {
+    settings(cx).general.clone()
+}
+
+fn appearance(cx: &App) -> Appearance {
+    settings(cx).appearance.clone()
 }
 
 /// Recording in progress: the command waiting for a key, and the hook that
@@ -60,18 +88,28 @@ pub struct SettingsView {
     recording: Option<Recording>,
     /// A note under one command's row: a clash, or a key that cannot be used.
     note: Option<(&'static str, SharedString)>,
+    /// The settings as last drawn, to redraw only when they change.
+    drawn: Arc<Settings>,
     _subs: Vec<Subscription>,
 }
 
 impl SettingsView {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let subs = vec![cx.observe_window_appearance(window, |_, window, cx| {
-            themes::apply(Some(window), cx);
-        })];
+        let subs = vec![
+            cx.observe_window_appearance(window, |_, window, cx| themes::apply(Some(window), cx)),
+            cx.observe_global_in::<Shell>(window, |this: &mut Self, _, cx| {
+                let now = settings(cx);
+                if !Arc::ptr_eq(&this.drawn, &now) {
+                    this.drawn = now;
+                    cx.notify();
+                }
+            }),
+        ];
         SettingsView {
             focus: cx.focus_handle(),
             recording: None,
             note: None,
+            drawn: settings(cx),
             _subs: subs,
         }
     }
@@ -108,7 +146,7 @@ impl SettingsView {
                     return;
                 }
                 cx.stop_propagation();
-                this.recorded(&keystroke, window, cx);
+                this.recorded(&keystroke, cx);
             });
         });
         window.focus(&self.focus, cx);
@@ -120,14 +158,14 @@ impl SettingsView {
     }
 
     /// A key combination arrived while recording.
-    fn recorded(&mut self, keystroke: &Keystroke, _window: &mut Window, cx: &mut Context<Self>) {
+    fn recorded(&mut self, keystroke: &Keystroke, cx: &mut Context<Self>) {
         let Some(recording) = self.recording.take() else { return };
         cx.notify();
         let Some(command) = keymap::command(recording.command) else { return };
-        let keys = keystroke.unparse();
         if keystroke.key == "escape" && !keystroke.modifiers.modified() {
             return;
         }
+        let keys = keystroke.unparse();
         if let Err(err) = keymap::validate(&keys) {
             self.note = Some((command.id, err.into()));
             return;
@@ -140,18 +178,11 @@ impl SettingsView {
                 format!("{} is also {}.", keymap::pretty(&keys), names.join(", ")).into(),
             )
         });
-        let id = command.id.to_string();
-        let defaults = command.defaults;
-        settings::update(cx, |settings| {
-            let bound = settings
-                .keys
-                .entry(id)
-                .or_insert_with(|| defaults.iter().map(|k| k.to_string()).collect());
-            if !bound.iter().any(|k| *k == keys) {
-                bound.push(keys);
-            }
-        });
-        keymap::apply(cx);
+        let mut bound = current_keys(command, cx);
+        if !bound.contains(&keys) {
+            bound.push(keys);
+        }
+        set_keys(command, Some(bound), cx);
     }
 
     fn stop_recording(&mut self, cx: &mut Context<Self>) {
@@ -163,57 +194,39 @@ impl SettingsView {
     /// last: a command with no key is still in the menus.
     fn unbind(&mut self, command: &'static Command, keys: &str, cx: &mut Context<Self>) {
         self.note = None;
-        let id = command.id.to_string();
-        let defaults = command.defaults;
-        let keys = keys.to_string();
-        settings::update(cx, |settings| {
-            let bound = settings
-                .keys
-                .entry(id)
-                .or_insert_with(|| defaults.iter().map(|k| k.to_string()).collect());
-            bound.retain(|k| *k != keys);
-        });
-        keymap::apply(cx);
+        let mut bound = current_keys(command, cx);
+        bound.retain(|k| k != keys);
+        set_keys(command, Some(bound), cx);
         cx.notify();
     }
 
     fn reset_command(&mut self, command: &'static Command, cx: &mut Context<Self>) {
         self.note = None;
-        let id = command.id.to_string();
-        settings::update(cx, |settings| {
-            settings.keys.remove(&id);
-        });
-        keymap::apply(cx);
+        set_keys(command, None, cx);
         cx.notify();
     }
 
     // ----- pages ----------------------------------------------------------
 
     fn general_page(&self) -> SettingPage {
-        let sort_options = [
-            (SortKey::Name, "Name"),
-            (SortKey::Ext, "Extension"),
-            (SortKey::Size, "Size"),
-            (SortKey::Modified, "Date modified"),
-        ];
+        let defaults = General::default();
+        let sort_options = SortKey::ALL.map(|key| (key, key.label()));
         SettingPage::new("General")
             .icon(Lucide::Settings)
             .description("How the panes list files, and what the commands ask before they act.")
             .group(
-                SettingGroup::new()
-                    .title("Startup")
-                    .item(
-                        SettingItem::new(
-                            "Reopen the last folders",
-                            SettingField::switch(
-                                |cx| general(cx).restore_folders,
-                                |on, cx| settings::update(cx, |s| s.general.restore_folders = on),
-                            )
-                            .default_value(true),
+                SettingGroup::new().title("Startup").item(
+                    SettingItem::new(
+                        "Reopen the last folders",
+                        SettingField::switch(
+                            |cx| general(cx).restore_folders,
+                            |on, cx| edit(SettingsEdit::RestoreFolders(on), cx),
                         )
-                        .description("Start where the panes were when you quit, instead of in your home folder.")
-                        .keywords(["session", "folders", "restore"]),
-                    ),
+                        .default_value(defaults.restore_folders),
+                    )
+                    .description("Start where the panes were when you quit, instead of in your home folder.")
+                    .keywords(["session", "folders", "restore"]),
+                ),
             )
             .group(
                 SettingGroup::new()
@@ -223,11 +236,9 @@ impl SettingsView {
                             "Show hidden files",
                             SettingField::switch(
                                 |cx| general(cx).show_hidden,
-                                |on, cx| {
-                                    settings::update(cx, |s| s.general.show_hidden = on);
-                                },
+                                |on, cx| edit(SettingsEdit::ShowHidden(on), cx),
                             )
-                            .default_value(false),
+                            .default_value(defaults.show_hidden),
                         )
                         .description("Names that begin with a dot. ⌘⇧. toggles it for this session too.")
                         .keywords(["dotfiles", "hidden"]),
@@ -237,9 +248,9 @@ impl SettingsView {
                             "Folders first",
                             SettingField::switch(
                                 |cx| general(cx).folders_first,
-                                |on, cx| settings::update(cx, |s| s.general.folders_first = on),
+                                |on, cx| edit(SettingsEdit::FoldersFirst(on), cx),
                             )
-                            .default_value(true),
+                            .default_value(defaults.folders_first),
                         )
                         .description("Keep folders above files whatever the list is sorted by.")
                         .keywords(["sort", "directories"]),
@@ -253,12 +264,9 @@ impl SettingsView {
                                     .map(|(key, label)| (key.id().into(), (*label).into()))
                                     .collect(),
                                 |cx| general(cx).sort.id().into(),
-                                |value, cx| {
-                                    let key = SortKey::from_id(&value);
-                                    settings::update(cx, |s| s.general.sort = key);
-                                },
+                                |value, cx| edit(SettingsEdit::Sort(SortKey::from_id(&value)), cx),
                             )
-                            .default_value(SortKey::Name.id()),
+                            .default_value(defaults.sort.id()),
                         )
                         .description("Clicking a column header still sorts one tab by hand.")
                         .keywords(["order", "column"]),
@@ -268,9 +276,9 @@ impl SettingsView {
                             "Largest or newest first",
                             SettingField::switch(
                                 |cx| general(cx).sort_descending,
-                                |on, cx| settings::update(cx, |s| s.general.sort_descending = on),
+                                |on, cx| edit(SettingsEdit::SortDescending(on), cx),
                             )
-                            .default_value(false),
+                            .default_value(defaults.sort_descending),
                         )
                         .keywords(["sort", "descending", "reverse"]),
                     )
@@ -279,9 +287,9 @@ impl SettingsView {
                             "File icons",
                             SettingField::switch(
                                 |cx| general(cx).show_icons,
-                                |on, cx| settings::update(cx, |s| s.general.show_icons = on),
+                                |on, cx| edit(SettingsEdit::ShowIcons(on), cx),
                             )
-                            .default_value(true),
+                            .default_value(defaults.show_icons),
                         )
                         .description("Without them a row is all name, which fits more of a long one.")
                         .keywords(["icons"]),
@@ -295,12 +303,9 @@ impl SettingsView {
                                     .map(|f| (f.id().into(), f.label().into()))
                                     .collect(),
                                 |cx| general(cx).date_format.id().into(),
-                                |value, cx| {
-                                    let format = DateFormat::from_id(&value);
-                                    settings::update(cx, |s| s.general.date_format = format);
-                                },
+                                |value, cx| edit(SettingsEdit::DateFormat(DateFormat::from_id(&value)), cx),
                             )
-                            .default_value(DateFormat::Iso.id()),
+                            .default_value(defaults.date_format.id()),
                         )
                         .keywords(["date", "time", "format"]),
                     )
@@ -314,12 +319,9 @@ impl SettingsView {
                                     step: 1.,
                                 },
                                 |cx| general(cx).font_size() as f64,
-                                |value, cx| {
-                                    settings::update(cx, |s| s.general.font_size = value as f32);
-                                    themes::tweaks(cx);
-                                },
+                                |value, cx| edit(SettingsEdit::FontSize(value as f32), cx),
                             )
-                            .default_value(13.),
+                            .default_value(defaults.font_size as f64),
                         )
                         .description("Pixels. Everything in the window follows it.")
                         .keywords(["font", "size", "zoom"]),
@@ -334,50 +336,42 @@ impl SettingsView {
                                     step: 1.,
                                 },
                                 |cx| general(cx).row_height() as f64,
-                                |value, cx| {
-                                    settings::update(cx, |s| s.general.row_height = value as f32);
-                                },
+                                |value, cx| edit(SettingsEdit::RowHeight(value as f32), cx),
                             )
-                            .default_value(22.),
+                            .default_value(defaults.row_height as f64),
                         )
                         .description("Pixels. Lower fits more files on the screen.")
                         .keywords(["density", "compact", "spacing"]),
                     ),
             )
             .group(
-                SettingGroup::new()
-                    .title("Safety")
-                    .item(
-                        SettingItem::new(
-                            "Ask before moving to Trash",
-                            SettingField::switch(
-                                |cx| general(cx).confirm_trash,
-                                |on, cx| settings::update(cx, |s| s.general.confirm_trash = on),
-                            )
-                            .default_value(true),
+                SettingGroup::new().title("Safety").item(
+                    SettingItem::new(
+                        "Ask before moving to Trash",
+                        SettingField::switch(
+                            |cx| general(cx).confirm_trash,
+                            |on, cx| edit(SettingsEdit::ConfirmTrash(on), cx),
                         )
-                        .description("Deleting permanently always asks, whatever this says.")
-                        .keywords(["confirm", "delete", "trash"]),
-                    ),
+                        .default_value(defaults.confirm_trash),
+                    )
+                    .description("Deleting permanently always asks, whatever this says.")
+                    .keywords(["confirm", "delete", "trash"]),
+                ),
             )
             .group(
-                SettingGroup::new()
-                    .title("Tools")
-                    .item(
-                        SettingItem::new(
-                            "Terminal",
-                            SettingField::input(
-                                |cx| general(cx).terminal.clone().into(),
-                                |value, cx| {
-                                    settings::update(cx, |s| s.general.terminal = value.trim().to_string());
-                                },
-                            )
-                            .default_value(""),
+                SettingGroup::new().title("Tools").item(
+                    SettingItem::new(
+                        "Terminal",
+                        SettingField::input(
+                            |cx| general(cx).terminal.into(),
+                            |value, cx| edit(SettingsEdit::Terminal(value.to_string()), cx),
                         )
-                        .description(terminal_help())
-                        .layout(Axis::Vertical)
-                        .keywords(["terminal", "shell", "console"]),
-                    ),
+                        .default_value(defaults.terminal),
+                    )
+                    .description(terminal_help())
+                    .layout(Axis::Vertical)
+                    .keywords(["terminal", "shell", "console"]),
+                ),
             )
     }
 
@@ -385,25 +379,23 @@ impl SettingsView {
         let this = cx.weak_entity();
         // The page's own reset button puts every command it is showing back
         // to its defaults, through the handler on each row.
-        let mut page = SettingPage::new("Keys")
-            .icon(Lucide::Keyboard)
-            .description("Press the plus to add a key combination, or the cross on one to take it away. Search above to find a command.");
+        let mut page = SettingPage::new("Keys").icon(Lucide::Keyboard).description(
+            "Press the plus to add a key combination, or the cross on one to take it away. Search above to find a command.",
+        );
         for group in keymap::groups() {
             let mut section = SettingGroup::new().title(group);
             for command in keymap::COMMANDS.iter().filter(|c| c.group == group) {
                 let row_this = this.clone();
+                let reset_this = this.clone();
                 section = section.item(
                     SettingItem::render(move |_, _, cx| key_row(command, row_this.clone(), cx))
-                    .keywords(search_words(command))
-                    .on_reset(
-                        move |cx| command.is_changed(&cx.global::<AppState>().settings.keys),
-                        {
-                            let this = this.clone();
+                        .keywords(search_words(command))
+                        .on_reset(
+                            move |cx| command.is_changed(&settings(cx).keys),
                             move |_, cx| {
-                                let _ = this.update(cx, |this, cx| this.reset_command(command, cx));
-                            }
-                        },
-                    ),
+                                let _ = reset_this.update(cx, |this, cx| this.reset_command(command, cx));
+                            },
+                        ),
                 );
             }
             page = page.group(section);
@@ -428,31 +420,23 @@ impl SettingsView {
                                     .collect(),
                                 |cx| appearance(cx).mode.id().into(),
                                 |value, cx| {
-                                    let mode = AppearanceMode::from_id(&value);
-                                    settings::update(cx, |s| s.appearance.mode = mode);
-                                    themes::apply(None, cx);
+                                    edit(SettingsEdit::AppearanceMode(AppearanceMode::from_id(&value)), cx)
                                 },
                             )
-                            .default_value(AppearanceMode::System.id()),
+                            .default_value(Appearance::default().mode.id()),
                         )
                         .description("“System” follows the desktop's light and dark setting.")
                         .keywords(["dark", "light", "mode", "appearance"]),
                     )
                     .item(
-                        SettingItem::new(
-                            "Light theme",
-                            theme_dropdown(false),
-                        )
-                        .description("Used while the appearance is light.")
-                        .keywords(["theme", "light", "colors", "scheme"]),
+                        SettingItem::new("Light theme", theme_dropdown(false))
+                            .description("Used while the appearance is light.")
+                            .keywords(["theme", "light", "colors", "scheme"]),
                     )
                     .item(
-                        SettingItem::new(
-                            "Dark theme",
-                            theme_dropdown(true),
-                        )
-                        .description("Used while the appearance is dark.")
-                        .keywords(["theme", "dark", "colors", "scheme"]),
+                        SettingItem::new("Dark theme", theme_dropdown(true))
+                            .description("Used while the appearance is dark.")
+                            .keywords(["theme", "dark", "colors", "scheme"]),
                     ),
             )
             .group(
@@ -463,12 +447,20 @@ impl SettingsView {
     }
 }
 
-fn general(cx: &App) -> crate::settings::General {
-    cx.global::<AppState>().settings.general.clone()
+/// The keys a command answers to now: the user's, or the defaults.
+fn current_keys(command: &Command, cx: &App) -> Vec<String> {
+    command.keys(&settings(cx).keys).into_iter().map(str::to_string).collect()
 }
 
-fn appearance(cx: &App) -> crate::settings::Appearance {
-    cx.global::<AppState>().settings.appearance.clone()
+/// `None` puts the command back to its default keys.
+fn set_keys(command: &Command, keys: Option<Vec<String>>, cx: &App) {
+    edit(
+        SettingsEdit::Keys {
+            command: command.id.to_string(),
+            keys,
+        },
+        cx,
+    );
 }
 
 fn terminal_help() -> &'static str {
@@ -495,7 +487,8 @@ fn theme_dropdown(dark: bool) -> SettingField<SharedString> {
         .into_iter()
         .map(|(theme, scheme)| (theme.into(), scheme.into()))
         .collect();
-    let default = if dark { themes::DEFAULT_DARK } else { themes::DEFAULT_LIGHT };
+    let defaults = Appearance::default();
+    let default = if dark { defaults.dark } else { defaults.light };
     SettingField::scrollable_dropdown(
         options,
         move |cx| {
@@ -504,25 +497,21 @@ fn theme_dropdown(dark: bool) -> SettingField<SharedString> {
         },
         move |value, cx| {
             let name = value.to_string();
-            settings::update(cx, |s| {
+            edit(
                 if dark {
-                    s.appearance.dark = name;
+                    SettingsEdit::DarkTheme(name)
                 } else {
-                    s.appearance.light = name;
-                }
-            });
-            themes::apply(None, cx);
+                    SettingsEdit::LightTheme(name)
+                },
+                cx,
+            );
         },
     )
     .default_value(default)
 }
 
 /// One command and its keys.
-fn key_row(
-    command: &'static Command,
-    this: WeakEntity<SettingsView>,
-    cx: &mut App,
-) -> AnyElement {
+fn key_row(command: &'static Command, this: WeakEntity<SettingsView>, cx: &mut App) -> AnyElement {
     let theme = cx.theme().clone();
     let state = this.upgrade().map(|view| view.read(cx));
     let recording = state
@@ -534,7 +523,7 @@ fn key_row(
         .and_then(|view| view.note.clone())
         .filter(|(id, _)| *id == command.id)
         .map(|(_, text)| text);
-    let overrides: BTreeMap<String, Vec<String>> = cx.global::<AppState>().settings.keys.clone();
+    let overrides = settings(cx).keys.clone();
     let keys: Vec<String> = command.keys(&overrides).iter().map(|k| k.to_string()).collect();
     let changed = command.is_changed(&overrides);
 
@@ -599,24 +588,13 @@ fn key_row(
                                             .ghost()
                                             .xsmall()
                                             .tooltip("Take this key away")
-                                            .on_click({
-                                                let this = this.clone();
-                                                move |_, _, cx| {
-                                                    let keys = keys.clone();
-                                                    let _ = this.update(cx, |this, cx| {
-                                                        this.unbind(command, &keys, cx)
-                                                    });
-                                                }
+                                            .on_click(move |_, _, cx| {
+                                                let _ = this.update(cx, |this, cx| this.unbind(command, &keys, cx));
                                             }),
                                     )
                             }))
                             .when(keys.is_empty(), |el| {
-                                el.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child("no key"),
-                                )
+                                el.child(div().text_xs().text_color(theme.muted_foreground).child("no key"))
                             })
                             .child({
                                 let this = this.clone();
@@ -626,9 +604,7 @@ fn key_row(
                                     .xsmall()
                                     .tooltip("Add a key combination")
                                     .on_click(move |_, window, cx| {
-                                        let _ = this.update(cx, |this, cx| {
-                                            this.record(command.id, window, cx)
-                                        });
+                                        let _ = this.update(cx, |this, cx| this.record(command.id, window, cx));
                                     })
                             })
                             .child({
@@ -640,9 +616,7 @@ fn key_row(
                                     .disabled(!changed)
                                     .tooltip("Back to the default")
                                     .on_click(move |_, _, cx| {
-                                        let _ = this.update(cx, |this, cx| {
-                                            this.reset_command(command, cx)
-                                        });
+                                        let _ = this.update(cx, |this, cx| this.reset_command(command, cx));
                                     })
                             })
                         }),
@@ -676,9 +650,7 @@ fn preview(_: &RenderOptions, _: &mut Window, cx: &mut App) -> AnyElement {
             .px_2()
             .gap_2()
             .text_size(px(12.))
-            .when(selected, |el| {
-                el.bg(theme.list_active).border_1().border_color(theme.list_active_border)
-            })
+            .when(selected, |el| el.bg(theme.list_active).border_1().border_color(theme.list_active_border))
             .when(!selected, |el| el.border_1().border_color(theme.transparent))
             .child(
                 Icon::new(icon)

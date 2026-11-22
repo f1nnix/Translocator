@@ -1,10 +1,14 @@
 //! Translocator: a dual-pane file manager whose remote locations are
 //! plain shells reached through the system's OpenSSH client.
+//!
+//! This crate is the GPUI shell. Everything the application knows and does
+//! lives in the Crux core (`tl-app`), and the effects the core asks for are
+//! carried out by `tl-runtime`; the shell draws the core's view model and
+//! turns keys, clicks and menus into core events.
 
 mod actions;
 mod app_state;
 mod bookmarks;
-mod bridge;
 mod dialogs;
 mod editor;
 mod jobs;
@@ -13,10 +17,8 @@ mod pane;
 mod properties;
 mod quick_look;
 mod rename;
-mod settings;
 mod settings_window;
 mod sync;
-mod terminal;
 mod themes;
 #[cfg(test)]
 mod ui_tests;
@@ -66,6 +68,8 @@ fn main() {
         .with_quit_mode(QuitMode::LastWindowClosed)
         .run(|cx: &mut App| {
             gpui_kit::init(cx);
+            // Starts the core and its runtime; the view model arrives with
+            // the first render.
             app_state::init(cx);
             themes::register(cx);
             themes::apply(None, cx);
@@ -86,7 +90,7 @@ fn main() {
             match gpui_kit::open_window(options, cx, |window, cx| {
                 cx.new(|cx| workspace::Workspace::new(window, cx))
             }) {
-                Ok((handle, _)) => cx.global_mut::<app_state::AppState>().main_window = Some(handle),
+                Ok((handle, _)) => cx.global_mut::<app_state::Shell>().main_window = Some(handle),
                 Err(err) => {
                     log::error!("cannot open the main window: {err}");
                     cx.quit();

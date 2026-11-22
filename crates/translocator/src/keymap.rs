@@ -5,6 +5,10 @@
 //! the function bar and menus read their shortcuts back out of it, so a
 //! rebound key is never described wrongly.
 //!
+//! The user's keys are the core's settings (`view.settings.keys`); the
+//! settings window changes them with `SettingsEdit::Keys`, and the shell
+//! calls [`apply`] again whenever the keys in the view change.
+//!
 //! Rebinding at runtime cannot clear the key map — the component library has
 //! its own bindings in there, for text fields and menus — so a change binds
 //! GPUI's `Unbind` marker over the keystrokes this module installed last time
@@ -16,7 +20,7 @@ use std::collections::BTreeMap;
 use gpui_kit::{Action, App, Global, KeyBinding, Keystroke, SharedString, Unbind};
 
 use crate::actions::*;
-use crate::app_state::AppState;
+use crate::app_state::Shell;
 
 /// One keyboard command.
 pub struct Command {
@@ -228,7 +232,7 @@ impl Global for Installed {}
 /// Cheap to call when nothing has changed, which matters: resetting a page
 /// of keys calls it once per command.
 pub fn apply(cx: &mut App) {
-    let overrides = cx.global::<AppState>().settings.keys.clone();
+    let overrides = cx.global::<Shell>().view.settings.keys.clone();
     let mut wanted = Vec::new();
     let mut bindings = Vec::new();
     for command in COMMANDS {
@@ -264,21 +268,21 @@ pub fn apply(cx: &mut App) {
 
 /// Commands that would answer to `keys` as well, in the same context.
 pub fn conflicts(keys: &str, with: &Command, cx: &App) -> Vec<&'static Command> {
-    let overrides = &cx.global::<AppState>().settings.keys;
+    let overrides = &cx.global::<Shell>().view.settings.keys;
     COMMANDS
         .iter()
         .filter(|other| other.id != with.id)
         // Two commands in different contexts can share a key: one is in a
         // text field, the other in the file list.
         .filter(|other| other.context == with.context)
-        .filter(|other| other.keys(overrides).iter().any(|k| *k == keys))
+        .filter(|other| other.keys(overrides).contains(&keys))
         .collect()
 }
 
 /// The first key of a command, written the way this platform writes keys:
 /// `⌘E` on macOS, `Ctrl+E` elsewhere.
 pub fn shortcut(id: &str, cx: &App) -> Option<SharedString> {
-    let overrides = &cx.global::<AppState>().settings.keys;
+    let overrides = &cx.global::<Shell>().view.settings.keys;
     let command = command(id)?;
     let keys = command.keys(overrides);
     keys.first().map(|keys| pretty(keys).into())

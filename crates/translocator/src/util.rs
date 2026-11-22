@@ -1,34 +1,10 @@
-//! Small helpers shared by the UI modules.
-
-use std::cmp::Ordering;
-use std::future::Future;
+//! Small helpers shared by the UI modules: what depends on the platform
+//! (local time) or is pure presentation (icons, editor languages).
 
 use chrono::{Datelike, Local, TimeZone};
 use gpui_kit::assets::IconName;
-use tl_core::{Entry, EntryKind, VfsError, VfsResult};
-
-use crate::settings::DateFormat;
-
-/// Runs blocking provider work on a fresh thread and resolves with its
-/// result. File operations block on disks and networks; this keeps them
-/// off both the UI thread and gpui's shared executor.
-pub fn blocking<T: Send + 'static>(
-    work: impl FnOnce() -> VfsResult<T> + Send + 'static,
-) -> impl Future<Output = VfsResult<T>> {
-    let (tx, rx) = futures::channel::oneshot::channel();
-    let spawned = std::thread::Builder::new()
-        .name("tl-worker".into())
-        .spawn(move || {
-            let _ = tx.send(work());
-        });
-    async move {
-        if let Err(err) = spawned {
-            return Err(VfsError::other(format!("cannot start worker thread: {err}")));
-        }
-        rx.await
-            .unwrap_or_else(|_| Err(VfsError::other("worker thread crashed")))
-    }
-}
+use tl_app::settings::DateFormat;
+use tl_app::tl_model::{Entry, EntryKind};
 
 /// A date in the file list, written the way the settings ask for.
 pub fn format_date(mtime: Option<i64>, format: DateFormat) -> String {
@@ -64,50 +40,6 @@ pub fn format_date_long(mtime: Option<i64>) -> String {
         dt.format("%b %-d %H:%M").to_string()
     } else {
         dt.format("%Y-%m-%d %H:%M").to_string()
-    }
-}
-
-/// Case-insensitive natural order: `file2` before `file10`. Case only
-/// breaks ties between otherwise equal names.
-pub fn natural_cmp(a: &str, b: &str) -> Ordering {
-    natural_cmp_ignore_case(a, b).then_with(|| a.cmp(b))
-}
-
-fn natural_cmp_ignore_case(a: &str, b: &str) -> Ordering {
-    let mut a = a.chars().peekable();
-    let mut b = b.chars().peekable();
-    loop {
-        match (a.peek().copied(), b.peek().copied()) {
-            (None, None) => return Ordering::Equal,
-            (None, Some(_)) => return Ordering::Less,
-            (Some(_), None) => return Ordering::Greater,
-            (Some(x), Some(y)) if x.is_ascii_digit() && y.is_ascii_digit() => {
-                let mut na = String::new();
-                while let Some(c) = a.peek().copied().filter(char::is_ascii_digit) {
-                    na.push(c);
-                    a.next();
-                }
-                let mut nb = String::new();
-                while let Some(c) = b.peek().copied().filter(char::is_ascii_digit) {
-                    nb.push(c);
-                    b.next();
-                }
-                let ta = na.trim_start_matches('0');
-                let tb = nb.trim_start_matches('0');
-                let ord = ta.len().cmp(&tb.len()).then_with(|| ta.cmp(tb));
-                if ord != Ordering::Equal {
-                    return ord;
-                }
-            }
-            (Some(x), Some(y)) => {
-                let ord = x.to_lowercase().cmp(y.to_lowercase());
-                if ord != Ordering::Equal {
-                    return ord;
-                }
-                a.next();
-                b.next();
-            }
-        }
     }
 }
 
@@ -162,6 +94,7 @@ pub fn entry_icon(entry: &Entry) -> IconName {
 }
 
 /// Editor language for a file name.
+#[allow(dead_code)] // for the editor windows (see `editor.rs`)
 pub fn language_for(name: &str) -> &'static str {
     let lower = name.to_ascii_lowercase();
     let ext = lower.rsplit('.').next().unwrap_or("");
@@ -194,15 +127,6 @@ pub fn language_for(name: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn natural_order() {
-        let mut names = vec!["file10", "File2", "file1", "a", "B", "file02"];
-        names.sort_by(|a, b| natural_cmp(a, b));
-        assert_eq!(names, ["a", "B", "file1", "File2", "file02", "file10"]);
-        assert_eq!(natural_cmp("abc", "ABC"), "abc".cmp("ABC"));
-        assert_eq!(natural_cmp("x9", "x10"), Ordering::Less);
-    }
 
     #[test]
     fn dates_follow_the_setting() {

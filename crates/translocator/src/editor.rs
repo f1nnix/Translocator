@@ -1,318 +1,245 @@
-//! Built-in viewer (F3) and editor (F4) windows. Files on servers are read
-//! and written over the same provider as the pane, so saving through sudo
-//! works like `sudo nano` on the server.
+//! The built-in viewer (F3) and editor (F4), each in a window of its own.
+//!
+//! The editors are the core's ([`tl_app::editor`]): it reads the file, says
+//! what the header, notice and footer show, saves (retrying with sudo when
+//! asked) and decides when a window goes. This keeps one window per
+//! [`EditorView`] in the view: [`sync`] opens a window for an editor it has
+//! not seen, passes every later view to its window and closes the window
+//! whose editor left the view.
+//!
+//! The text widget owns the live text. It is loaded from
+//! [`EditorView::content`] whenever [`EditorView::content_version`] changes,
+//! the first edit is reported ([`EditorInput::Changed`]) and the text goes
+//! back to the core only to be saved.
 
-use std::sync::Arc;
+use std::collections::HashMap;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Editor, EditorState, InputEvent};
 use gpui_kit::component::notification::Notification;
 use gpui_kit::component::tag::Tag;
-use gpui_kit::component::{ActiveTheme as _, Disableable as _, RopeExt as _, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Disableable as _, RopeExt as _, Sizable as _, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::{prelude::*, *};
-use tl_core::util::human_size;
-use tl_core::{OpCtx, VPath, Vfs, VfsError};
+use tl_app::editor::{ClosePrompt, CloseChoice, EditorInput, EditorView};
+use tl_app::{EditorId, Event, ToastKind, ViewModel};
 
 use crate::actions::{CloseEditor, EDITOR, SaveFile};
-use crate::dialogs;
-use crate::pane::Location;
-use crate::util::{blocking, language_for};
-use crate::workspace::Workspace;
+use crate::app_state::dispatch;
 
-/// The viewer reads at most this much.
-const VIEW_LIMIT: u64 = 8 * 1024 * 1024;
-/// Larger files are not opened for editing.
-const EDIT_LIMIT: u64 = 16 * 1024 * 1024;
+/// The open editor windows, by the core's id.
+#[derive(Default)]
+struct Windows(HashMap<EditorId, (AnyWindowHandle, Entity<EditorWindow>)>);
 
-/// Reads the file on a worker thread, then opens a window for it.
-pub fn open(
-    vfs: Arc<dyn Vfs>,
-    path: VPath,
-    elevated: bool,
-    readonly: bool,
-    workspace: WeakEntity<Workspace>,
-    window: &mut Window,
-    cx: &mut Context<Workspace>,
-) {
-    cx.spawn_in(window, async move |_this, cx| {
-        let (v, p) = (vfs.clone(), path.clone());
-        let result = blocking(move || {
-            let ctx = OpCtx::new().elevated(elevated);
-            let meta = v
-                .stat(&p, &ctx)?
-                .ok_or_else(|| VfsError::NotFound(p.display()))?;
-            if !readonly && meta.size > EDIT_LIMIT {
-                return Err(VfsError::other(format!(
-                    "{} is too large to edit ({}). Press F3 to view it.",
-                    p.file_name_lossy(),
-                    human_size(meta.size)
-                )));
+impl Global for Windows {}
+
+/// Brings the editor windows in line with the view: opens the new ones,
+/// updates the open ones and closes those whose editor is gone.
+pub fn sync(view: &ViewModel, cx: &mut App) {
+    let open: Vec<EditorId> = cx
+        .try_global::<Windows>()
+        .map(|windows| windows.0.keys().copied().collect())
+        .unwrap_or_default();
+    for id in open {
+        if view.editors.iter().any(|editor| editor.id == id) {
+            continue;
+        }
+        if let Some((handle, _)) = cx.default_global::<Windows>().0.remove(&id) {
+            let _ = handle.update(cx, |_, window, _| window.remove_window());
+        }
+    }
+
+    for editor in &view.editors {
+        let id = editor.id;
+        match cx.default_global::<Windows>().0.get(&id).cloned() {
+            Some((handle, entity)) => {
+                let editor = editor.clone();
+                let updated = handle.update(cx, |_, window, cx| {
+                    entity.update(cx, |this, cx| this.view_changed(editor, window, cx))
+                });
+                if updated.is_err() {
+                    // The window went without asking the core first.
+                    cx.default_global::<Windows>().0.remove(&id);
+                    dispatch(Event::Editor(id, EditorInput::Closed), cx);
+                }
             }
-            let limit = if readonly { VIEW_LIMIT } else { EDIT_LIMIT };
-            let data = v.read_file(&p, limit, &ctx)?;
-            Ok((data, meta.size))
-        })
-        .await;
-        let _ = cx.update(move |window, cx| match result {
-            Ok((data, size)) => open_window(vfs, path, elevated, readonly, data, size, workspace, cx),
-            Err(VfsError::PermissionDenied(msg)) if !elevated && vfs.capabilities().elevation => {
-                let answer = dialogs::ask_confirm(
-                    window,
-                    cx,
-                    "Permission denied",
-                    format!("{msg}\n\nOpen it with sudo?"),
-                    "Use sudo",
-                    false,
-                );
-                let workspace2 = workspace.clone();
-                cx.spawn(async move |cx| {
-                    if answer.await {
-                        let _ = workspace2.update_in(cx, |_, window, cx| {
-                            open(vfs, path, true, readonly, workspace.clone(), window, cx)
-                        });
-                    }
-                })
-                .detach();
-            }
-            Err(err) => window.push_notification(Notification::error(err.to_string()), cx),
-        });
-    })
-    .detach();
+            None => open_window(editor.clone(), cx),
+        }
+    }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn open_window(
-    vfs: Arc<dyn Vfs>,
-    path: VPath,
-    elevated: bool,
-    readonly: bool,
-    data: Vec<u8>,
-    file_size: u64,
-    workspace: WeakEntity<Workspace>,
-    cx: &mut App,
-) {
-    let mut notice = None;
-    let mut readonly = readonly;
-    if data.len() as u64 > 0 && (data.len() as u64) < file_size {
-        notice = Some(format!(
-            "Showing the first {} of {}.",
-            human_size(data.len() as u64),
-            human_size(file_size)
-        ));
-    }
-    let binary = data.iter().take(8192).any(|b| *b == 0);
-    let text = match String::from_utf8(data) {
-        Ok(text) => text,
-        Err(err) => {
-            if !readonly {
-                notice = Some("Not valid UTF-8: opened read-only so saving cannot damage it.".into());
-            }
-            readonly = true;
-            String::from_utf8_lossy(err.as_bytes()).into_owned()
-        }
-    };
-    if binary {
-        readonly = true;
-        notice = Some("Binary file: shown as text, read-only.".into());
-    }
-    let loc = Location {
-        vfs: vfs.clone(),
-        path: path.parent().unwrap_or_else(VPath::root),
-    };
-    let title = format!(
-        "{} — {}{}",
-        path.file_name_lossy(),
-        loc.display(),
-        if elevated { " (sudo)" } else { "" }
-    );
+fn open_window(view: EditorView, cx: &mut App) {
+    let id = view.id;
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::centered(size(px(960.), px(720.)), cx)),
         titlebar: Some(TitlebarOptions {
-            title: Some(title.into()),
+            title: Some(view.title.clone().into()),
             ..Default::default()
         }),
         window_min_size: Some(size(px(420.), px(280.))),
         ..Default::default()
     };
-    let result = gpui_kit::open_window(options, cx, move |window, cx| {
-        cx.new(|cx| EditorView::new(vfs, path, elevated, readonly, text, notice, workspace, window, cx))
-    });
-    if let Err(err) = result {
-        log::error!("cannot open editor window: {err}");
+    match gpui_kit::open_window(options, cx, move |window, cx| {
+        cx.new(|cx| EditorWindow::new(view, window, cx))
+    }) {
+        Ok((handle, entity)) => {
+            cx.default_global::<Windows>().0.insert(id, (handle, entity));
+        }
+        Err(err) => {
+            log::error!("cannot open editor window: {err}");
+            dispatch(Event::Editor(id, EditorInput::Closed), cx);
+        }
     }
 }
 
-pub struct EditorView {
-    vfs: Arc<dyn Vfs>,
-    path: VPath,
-    elevated: bool,
-    readonly: bool,
+struct EditorWindow {
+    /// The core's view of this editor, as last drawn.
+    view: EditorView,
     state: Entity<EditorState>,
-    language: &'static str,
-    dirty: bool,
-    saving: bool,
-    notice: Option<SharedString>,
-    workspace: WeakEntity<Workspace>,
     focus: FocusHandle,
+    /// The first edit since the text was last clean has been reported.
+    sent_changed: bool,
+    /// The "Save changes?" prompt is up, or answered and waiting for the
+    /// core to take it down.
+    prompting: bool,
     _subs: Vec<Subscription>,
 }
 
-impl EditorView {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        vfs: Arc<dyn Vfs>,
-        path: VPath,
-        elevated: bool,
-        readonly: bool,
-        text: String,
-        notice: Option<String>,
-        workspace: WeakEntity<Workspace>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let language = language_for(&path.file_name_lossy());
+impl EditorWindow {
+    fn new(view: EditorView, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let state = cx.new(|cx| {
             EditorState::new(window, cx)
-                .language(language)
+                .language(view.language)
                 .line_number(true)
                 .soft_wrap(false)
-                .default_value(text)
+                .default_value(view.content.to_string())
         });
-        let mut subs = vec![cx.subscribe(&state, |this: &mut Self, _, ev: &InputEvent, cx| {
-            if matches!(ev, InputEvent::Change) && !this.readonly && !this.dirty {
-                this.dirty = true;
-                cx.notify();
-            }
-        })];
-        let handle = cx.weak_entity();
-        window.on_window_should_close(cx, move |window, cx| {
-            handle
-                .update(cx, |this, cx| this.should_close(window, cx))
-                .unwrap_or(true)
+        let subs = vec![
+            cx.subscribe(&state, |this: &mut Self, _, ev: &InputEvent, cx| {
+                if matches!(ev, InputEvent::Change) {
+                    this.edited(cx);
+                }
+            }),
+            cx.observe_window_appearance(window, |_, window, cx| crate::themes::apply(Some(window), cx)),
+        ];
+        // The close button asks the core, which closes the window itself
+        // (through `sync`) or asks about the unsaved changes first.
+        let id = view.id;
+        window.on_window_should_close(cx, move |_, cx| {
+            dispatch(Event::Editor(id, EditorInput::Close), cx);
+            false
         });
-        subs.push(cx.observe_window_appearance(window, |_, window, cx| {
-            crate::themes::apply(Some(window), cx);
-        }));
         state.update(cx, |s, cx| s.focus(window, cx));
-        EditorView {
-            vfs,
-            path,
-            elevated,
-            readonly,
+        let prompt = view.close_prompt.clone();
+        let mut this = EditorWindow {
+            view,
             state,
-            language,
-            dirty: false,
-            saving: false,
-            notice: notice.map(Into::into),
-            workspace,
             focus: cx.focus_handle(),
+            sent_changed: false,
+            prompting: false,
             _subs: subs,
+        };
+        if let Some(prompt) = prompt {
+            this.prompt(prompt, window, cx);
         }
+        this
     }
 
-    fn should_close(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if !self.dirty {
-            return true;
-        }
-        let answer = window.prompt(
-            PromptLevel::Warning,
-            &format!("Save changes to “{}”?", self.path.file_name_lossy()),
-            Some("Your changes will be lost if you don't save them."),
-            &["Save", "Don't Save", "Cancel"],
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            match answer.await {
-                Ok(0) => {
-                    let _ = this.update_in(cx, |this, window, cx| this.save_then(true, window, cx));
-                }
-                Ok(1) => {
-                    let _ = this.update_in(cx, |this, window, _cx| {
-                        this.dirty = false;
-                        window.remove_window();
-                    });
-                }
-                _ => {}
-            }
-        })
-        .detach();
-        false
-    }
-
-    fn save(&mut self, _: &SaveFile, window: &mut Window, cx: &mut Context<Self>) {
-        self.save_then(false, window, cx);
-    }
-
-    fn close(&mut self, _: &CloseEditor, window: &mut Window, cx: &mut Context<Self>) {
-        if self.should_close(window, cx) {
-            window.remove_window();
-        }
-    }
-
-    fn save_then(&mut self, close: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.readonly || self.saving {
+    /// Takes in the core's latest view of this editor.
+    fn view_changed(&mut self, new: EditorView, window: &mut Window, cx: &mut Context<Self>) {
+        if new == self.view {
             return;
         }
-        self.saving = true;
+        let old = std::mem::replace(&mut self.view, new);
+        let view = &self.view;
+        if old.content_version != view.content_version {
+            let text = view.content.to_string();
+            self.state.update(cx, |s, cx| s.set_value(text, window, cx));
+        }
+        if !view.dirty {
+            self.sent_changed = false;
+        }
+        let seq = |n: &Option<tl_app::editor::Notice>| n.as_ref().map(|n| n.seq);
+        if seq(&old.notification) != seq(&view.notification)
+            && let Some(notice) = view.notification.clone()
+        {
+            let note = match notice.kind {
+                ToastKind::Info => Notification::info(notice.message),
+                ToastKind::Success => Notification::success(notice.message),
+                ToastKind::Error => Notification::error(notice.message),
+            };
+            window.push_notification(note, cx);
+        }
+        match (view.close_prompt.clone(), self.prompting) {
+            (Some(prompt), false) => self.prompt(prompt, window, cx),
+            (None, _) => self.prompting = false,
+            (Some(_), true) => {}
+        }
         cx.notify();
-        let text = self.state.read(cx).value().to_string();
-        let (vfs, path, elevated) = (self.vfs.clone(), self.path.clone(), self.elevated);
+    }
+
+    /// The native "Save changes?" prompt; the answer goes to the core.
+    fn prompt(&mut self, prompt: ClosePrompt, window: &mut Window, cx: &mut Context<Self>) {
+        self.prompting = true;
+        let answer = window.prompt(
+            PromptLevel::Warning,
+            &prompt.message,
+            Some(prompt.detail),
+            &prompt.buttons,
+            cx,
+        );
+        let id = self.view.id;
         cx.spawn_in(window, async move |this, cx| {
-            let (v, p) = (vfs.clone(), path.clone());
-            let bytes = text.clone().into_bytes();
-            let result = blocking(move || v.write_file(&p, &bytes, &OpCtx::new().elevated(elevated))).await;
-            let _ = this.update_in(cx, move |this, window, cx| {
-                this.saving = false;
-                match result {
-                    Ok(()) => {
-                        this.dirty = false;
-                        this.notice = None;
-                        let dir = path.parent().unwrap_or_else(VPath::root);
-                        let key = vfs.location_key().to_string();
-                        let _ = this.workspace.update(cx, |ws, cx| ws.refresh_dir(&key, &dir, cx));
-                        if close {
-                            window.remove_window();
-                        } else {
-                            window.push_notification(Notification::success("Saved"), cx);
-                        }
-                    }
-                    Err(VfsError::PermissionDenied(msg)) if !elevated && vfs.capabilities().elevation => {
-                        let answer = dialogs::ask_confirm(
-                            window,
-                            cx,
-                            "Permission denied",
-                            format!("{msg}\n\nSave as root with sudo? The file keeps its owner and permissions."),
-                            "Save with sudo",
-                            false,
-                        );
-                        cx.spawn_in(window, async move |this, cx| {
-                            if answer.await {
-                                let _ = this.update_in(cx, |this, window, cx| {
-                                    this.elevated = true;
-                                    this.save_then(close, window, cx);
-                                });
-                            }
-                        })
-                        .detach();
-                    }
-                    Err(err) => dialogs::error(window, cx, "Cannot save", err.to_string()),
-                }
-                cx.notify();
+            let answer = answer.await;
+            let _ = this.update(cx, |this, cx| {
+                let choice = match answer {
+                    Ok(0) => CloseChoice::Save { text: this.text(cx) },
+                    Ok(1) => CloseChoice::DontSave,
+                    _ => CloseChoice::Cancel,
+                };
+                dispatch(Event::Editor(id, EditorInput::CloseAnswer(choice)), cx);
             });
         })
         .detach();
     }
+
+    fn text(&self, cx: &App) -> String {
+        self.state.read(cx).value().to_string()
+    }
+
+    /// The text widget changed: the first edit of an editable file makes it
+    /// modified, which only the core decides.
+    fn edited(&mut self, cx: &mut Context<Self>) {
+        if self.view.readonly || self.view.dirty || self.sent_changed {
+            return;
+        }
+        self.sent_changed = true;
+        dispatch(Event::Editor(self.view.id, EditorInput::Changed), cx);
+    }
+
+    fn save_now(&mut self, cx: &mut Context<Self>) {
+        if self.view.readonly {
+            return;
+        }
+        let text = self.text(cx);
+        dispatch(Event::Editor(self.view.id, EditorInput::Save { text }), cx);
+    }
+
+    fn save(&mut self, _: &SaveFile, _: &mut Window, cx: &mut Context<Self>) {
+        self.save_now(cx);
+    }
+
+    fn close(&mut self, _: &CloseEditor, _: &mut Window, cx: &mut Context<Self>) {
+        dispatch(Event::Editor(self.view.id, EditorInput::Close), cx);
+    }
 }
 
-impl Render for EditorView {
+impl Render for EditorWindow {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let lines = self.state.read(cx).text().lines_len();
-        let full = format!(
-            "{}{}",
-            if self.vfs.plugin_id() == tl_local::PLUGIN_ID { String::new() } else { format!("{}:", self.vfs.label()) },
-            self.path
-        );
+        let view = &self.view;
         v_flex()
             .size_full()
             .key_context(EDITOR)
@@ -335,23 +262,23 @@ impl Render for EditorView {
                             .truncate()
                             .text_size(px(12.))
                             .font_family(theme.mono_font_family.clone())
-                            .child(full),
+                            .child(view.full_path.clone()),
                     )
-                    .when(self.elevated, |el| el.child(Tag::danger().small().child("sudo")))
-                    .when(self.readonly, |el| el.child(Tag::secondary().small().child("read-only")))
-                    .when(self.dirty, |el| el.child(Tag::warning().small().child("modified")))
-                    .when(!self.readonly, |el| {
+                    .when(view.elevated, |el| el.child(Tag::danger().small().child("sudo")))
+                    .when(view.readonly, |el| el.child(Tag::secondary().small().child("read-only")))
+                    .when(view.dirty, |el| el.child(Tag::warning().small().child("modified")))
+                    .when(!view.readonly, |el| {
                         el.child(
                             Button::new("save")
-                                .label(if self.saving { "Saving…" } else { "Save" })
+                                .label(view.save_label)
                                 .primary()
                                 .small()
-                                .disabled(!self.dirty || self.saving)
-                                .on_click(cx.listener(|this, _, window, cx| this.save_then(false, window, cx))),
+                                .disabled(!view.can_save)
+                                .on_click(cx.listener(|this, _, _, cx| this.save_now(cx))),
                         )
                     }),
             )
-            .when_some(self.notice.clone(), |el, notice| {
+            .when_some(view.notice.clone(), |el, notice| {
                 el.child(
                     div()
                         .px_2()
@@ -366,7 +293,7 @@ impl Render for EditorView {
                 div()
                     .flex_1()
                     .min_h_0()
-                    .child(Editor::new(&self.state).h_full().bordered(false).readonly(self.readonly)),
+                    .child(Editor::new(&self.state).h_full().bordered(false).readonly(view.readonly)),
             )
             .child(
                 h_flex()
@@ -379,9 +306,9 @@ impl Render for EditorView {
                     .border_t_1()
                     .border_color(theme.border)
                     .child(format!("{lines} lines"))
-                    .child(self.language)
+                    .child(view.language)
                     .child(div().flex_1())
-                    .child(if self.readonly { "F3 viewer · ⌘W close" } else { "⌘S save · ⌘W close" }),
+                    .child(view.hint),
             )
     }
 }

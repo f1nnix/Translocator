@@ -1,24 +1,55 @@
-//! Headless UI tests: the real workspace in a GPUI test window, driven
-//! through its actions, dialogs and the keyboard, while the file operations
-//! run for real on temporary folders.
+//! Headless UI tests: the real workspace in a GPUI test window, over a real
+//! core and runtime, driven through its actions, dialogs and the keyboard,
+//! while the file operations run for real on temporary folders.
+//!
+//! The core runs on the runtime's own thread and the file work on its
+//! workers, so every step waits ([`Fixture::settle`]) until the runtime has
+//! nothing left to do, the shell has taken in everything it sent, and the
+//! view has stopped changing. What a test reads is then what the window
+//! shows: the core's view model as the shell last received it, the GPUI
+//! entities and windows, and the files on disk.
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::rc::Rc;
+use std::time::{Duration, Instant, SystemTime};
 
-use gpui::{Action, AnyWindowHandle, App, AppContext as _, Bounds, Entity, Point, TestAppContext, WindowBounds, WindowOptions, px, size};
+use gpui::{
+    Action, AnyWindowHandle, App, AppContext as _, Bounds, Entity, Point, TestAppContext, WindowBounds,
+    WindowOptions, px, size,
+};
+use tl_app::dialog::DialogKind;
+use tl_app::model::SettingsEdit;
+use tl_app::pane::{PARENT, PaneInput};
+use tl_app::quick_look::Body;
+use tl_app::settings::{AppearanceMode, Settings};
+use tl_app::view::{LocationKind, PaneView};
+use tl_app::{Event, Side, ViewModel};
+use tl_runtime::Runtime;
 
 use crate::actions::*;
-use crate::app_state;
-use crate::settings::Settings;
-use crate::pane::{FilePane, Side};
+use crate::app_state::{self, Shell};
+use crate::pane::FilePane;
 use crate::workspace::Workspace;
 
+/// How long a test waits for anything at all before it gives up.
+const DEADLINE: Duration = Duration::from_secs(60);
+
 struct Fixture {
-    _tmp: tempfile::TempDir,
+    runtime: Runtime,
     root: PathBuf,
     window: AnyWindowHandle,
     ws: Entity<Workspace>,
+    // Last: the runtime is shut down (in `drop`) before its folders go.
+    _tmp: tempfile::TempDir,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        // Stops the runtime's threads, jobs and watchers while the
+        // temporary folders still exist.
+        self.runtime.shutdown();
+    }
 }
 
 fn write(path: &Path, text: &str, age_days: u64) {
@@ -34,10 +65,69 @@ fn read(path: PathBuf) -> String {
     fs::read_to_string(path).unwrap_or_default()
 }
 
+/// The members of a tar archive, as `tar -t` lists them (empty if it
+/// cannot be read yet).
+fn tar_members(path: &Path) -> String {
+    std::process::Command::new("tar")
+        .arg("-tzf")
+        .arg(path)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
+/// The rows a pane lists, ".." left out, in order.
+fn listed(pane: &PaneView) -> Vec<String> {
+    pane.order
+        .iter()
+        .filter(|ix| **ix != PARENT)
+        .filter_map(|&ix| pane.listing.names.get(ix as usize).cloned())
+        .collect()
+}
+
+/// The name under a pane's cursor; ".." for the row above the folder.
+fn cursor_name(pane: &PaneView) -> Option<String> {
+    match *pane.order.get(pane.cursor)? {
+        PARENT => Some("..".into()),
+        ix => pane.listing.names.get(ix as usize).cloned(),
+    }
+}
+
+fn pane_view(view: &ViewModel, side: Side) -> &PaneView {
+    &view.panes[side.index()]
+}
+
+/// The folder a pane is in, as a local path.
+fn pane_dir(view: &ViewModel, side: Side) -> PathBuf {
+    pane_view(view, side).path.to_local()
+}
+
+/// What quick look shows, in the terms the tests compare.
+#[derive(Debug, PartialEq)]
+enum Preview {
+    Nothing,
+    Reading,
+    Text(String),
+    Note(String),
+    Image(usize),
+    Other(String),
+}
+
+fn preview_of(body: &Body) -> Preview {
+    match body {
+        Body::Nothing => Preview::Nothing,
+        Body::Reading => Preview::Reading,
+        Body::Text { text, .. } => Preview::Text(text.to_string()),
+        Body::Note(note) => Preview::Note(note.clone()),
+        Body::Image { bytes, .. } => Preview::Image(bytes.len()),
+        other => Preview::Other(format!("{other:?}")),
+    }
+}
+
 /// Opens the workspace on `<tmp>/left` and `<tmp>/right` after `build`
-/// filled the folders.
+/// filled the folders (and, if it wants, `<tmp>/state`).
 fn open(cx: &mut TestAppContext, build: impl FnOnce(&Path)) -> Fixture {
-    // File operations run on real worker threads.
+    // The runtime and the file operations run on real threads.
     cx.executor().allow_parking();
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
@@ -48,13 +138,13 @@ fn open(cx: &mut TestAppContext, build: impl FnOnce(&Path)) -> Fixture {
     let mut settings = Settings::default();
     settings.session.left_path = Some(root.join("left").display().to_string());
     settings.session.right_path = Some(root.join("right").display().to_string());
-    let state = root.join("state");
-    let (window, ws) = cx.update(|cx| {
+    let (runtime, window, ws) = cx.update(|cx| {
         gpui_kit::init(cx);
-        app_state::init_for_tests(cx, &state, settings);
-        crate::themes::register(cx);
         // The same order `main` starts in, so a test sees the key map and
         // the menus the application really has.
+        let runtime = app_state::init_for_tests(cx, &root, &settings);
+        crate::themes::register(cx);
+        crate::themes::apply(None, cx);
         crate::actions::handle_system_actions(cx);
         crate::actions::bind_system_keys(cx);
         crate::keymap::apply(cx);
@@ -65,85 +155,135 @@ fn open(cx: &mut TestAppContext, build: impl FnOnce(&Path)) -> Fixture {
             })),
             ..Default::default()
         };
-        gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Workspace::new(window, cx))).expect("test window")
+        let (window, ws) =
+            gpui_kit::open_window(options, cx, |window, cx| cx.new(|cx| Workspace::new(window, cx))).expect("test window");
+        cx.global_mut::<Shell>().main_window = Some(window);
+        (runtime, window, ws)
     });
     // gpui reports an empty focus path while a window is inactive, and a
-    // pane learns it is the active one from a focus event, so without this
-    // every test would run with the left pane active whatever it focused.
+    // pane tells the core it is the active one from a focus event, so
+    // without this every test would run with the left pane active whatever
+    // it focused.
     cx.update_window(window, |_, window, _| window.activate_window()).unwrap();
     cx.run_until_parked();
     let fixture = Fixture {
-        _tmp: tmp,
-        root,
+        runtime,
+        root: root.clone(),
         window,
         ws,
+        _tmp: tmp,
     };
-    fixture.settle(cx, "both panes to load", |ws, cx| {
-        [Side::Left, Side::Right].iter().all(|s| {
-            let pane = ws.pane(*s).read(cx);
-            !pane.is_loading()
-        })
+    fixture.settle(cx, "both panes to load", move |view, _| {
+        view.ready
+            && [(Side::Left, "left"), (Side::Right, "right")].iter().all(|(side, dir)| {
+                let pane = pane_view(view, *side);
+                !pane.loading && pane.path.to_local() == root.join(dir)
+            })
     });
     fixture
 }
 
 impl Fixture {
-    /// Draws, runs the UI and the worker threads until `done` holds. The
-    /// test clock moves on too, so animations and timers complete.
+    /// Draws, runs the UI and lets the runtime work until the view is
+    /// current and `done` holds.
     ///
-    /// It gives up on the clock rather than after a number of turns: the
-    /// work being waited for runs on real threads against real files, and a
-    /// machine with every core busy takes longer to do the same amount of
-    /// it. Counting turns made that look like a hung test.
-    fn settle(&self, cx: &mut TestAppContext, what: &str, mut done: impl FnMut(&Workspace, &App) -> bool) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    /// Current means: the runtime has nothing queued, running or about to
+    /// fire; the shell has carried out everything the runtime sent it; and
+    /// the view the shell holds is the one it held a turn ago — so a
+    /// reaction of the shell (a focus event, a dialog's field) has been
+    /// through the core too. The GPUI clock moves on each turn, so
+    /// animations and the shell's timers complete.
+    ///
+    /// It gives up on the wall clock rather than after a number of turns:
+    /// the work runs on real threads against real files, and a machine with
+    /// every core busy takes longer to do the same amount of it.
+    fn settle(&self, cx: &mut TestAppContext, what: &str, mut done: impl FnMut(&ViewModel, &App) -> bool) {
+        let deadline = Instant::now() + DEADLINE;
+        let mut last: Option<Rc<ViewModel>> = None;
         loop {
             self.draw(cx);
             cx.executor().advance_clock(Duration::from_millis(20));
             cx.run_until_parked();
-            let ws = self.ws.clone();
-            if cx.update(|cx| done(ws.read(cx), cx)) {
+            self.runtime.settle(Duration::from_millis(20));
+            cx.run_until_parked();
+            let view = cx.update(|cx| app_state::view(cx));
+            let current = self.runtime.settle(Duration::ZERO)
+                && cx.update(|cx| app_state::ui_idle(cx))
+                && last.as_ref().is_some_and(|last| Rc::ptr_eq(last, &view));
+            if current && cx.update(|cx| done(&view, cx)) {
                 return;
             }
-            if std::time::Instant::now() >= deadline {
-                panic!("timed out waiting for {what}\n{}", self.snapshot(cx));
+            last = Some(view);
+            if Instant::now() >= deadline {
+                let state = if current { "the view was current" } else { "the view never settled" };
+                panic!("timed out after {DEADLINE:?} waiting for {what} ({state})\n{}", self.snapshot(cx));
             }
-            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
-    /// Both panes as they stand, printed when a wait gives up: what a
-    /// stuck test was actually looking at.
+    /// Waits until nothing is going on any more.
+    fn quiet(&self, cx: &mut TestAppContext) {
+        self.settle(cx, "the view to settle", |_, _| true);
+    }
+
+    /// The window as it stands, printed when a wait gives up: what a stuck
+    /// test was actually looking at.
     fn snapshot(&self, cx: &mut TestAppContext) -> String {
-        let ws = self.ws.clone();
-        cx.update(|cx| {
-            let ws = ws.read(cx);
-            let mut out = format!("active: {:?}\n", ws.active_side());
-            for side in [Side::Left, Side::Right] {
-                let pane = ws.pane(side).read(cx);
-                out.push_str(&format!(
-                    "{side:?}: {} · {} rows · cursor {:?} · loading {} · in archive {}\n",
-                    pane.location().display(),
-                    pane.listed_entries().len(),
-                    pane.cursor_row().map(|r| r.name.to_string()),
-                    pane.is_loading(),
-                    pane.location().vfs.host().is_some(),
-                ));
-            }
-            out
-        })
+        let view = cx.update(|cx| app_state::view(cx));
+        let mut out = format!("active: {:?}\n", view.active);
+        for side in [Side::Left, Side::Right] {
+            let pane = pane_view(&view, side);
+            out.push_str(&format!(
+                "{side:?}: {} · {:?} · rows {:?} · cursor {:?} · marked {} · filter {:?} · loading {} · error {:?}\n",
+                pane.display,
+                pane.kind,
+                listed(pane),
+                cursor_name(pane),
+                pane.marked.len(),
+                pane.filter,
+                pane.loading,
+                pane.error,
+            ));
+        }
+        for dialog in &view.dialogs {
+            let kind = format!("{:?}", dialog.kind);
+            out.push_str(&format!("dialog {:?}: {}\n", dialog.id, kind.chars().take(300).collect::<String>()));
+        }
+        for job in &view.jobs {
+            out.push_str(&format!("job {}: {:?} {}\n", job.title, job.status, job.detail));
+        }
+        if let Some(ql) = &view.quick_look {
+            out.push_str(&format!("quick look on {:?}: {} {:?}\n", ql.side, ql.name, preview_of(&ql.body)));
+        }
+        out
     }
 
     fn draw(&self, cx: &mut TestAppContext) {
         cx.update_window(self.window, |_, window, cx| window.draw(cx).clear(cx)).unwrap();
     }
 
-    /// Dispatches `action` to the focused element, like its key binding.
+    fn view(&self, cx: &mut TestAppContext) -> Rc<ViewModel> {
+        cx.update(|cx| app_state::view(cx))
+    }
+
+    /// Dispatches `action` to the focused element, like its key binding,
+    /// and waits for what follows.
     fn dispatch(&self, cx: &mut TestAppContext, action: impl Action) {
         self.draw(cx);
         cx.dispatch_action(self.window, action);
-        self.draw(cx);
-        cx.run_until_parked();
+        self.quiet(cx);
+    }
+
+    /// Sends an event straight to the core, as the shell's own handlers
+    /// do, and waits for what follows.
+    fn send(&self, cx: &mut TestAppContext, event: Event) {
+        cx.update(|cx| app_state::dispatch(event, cx));
+        self.quiet(cx);
+    }
+
+    /// A change from the settings window.
+    fn edit(&self, cx: &mut TestAppContext, edit: SettingsEdit) {
+        self.send(cx, Event::Settings(edit));
     }
 
     fn keys(&self, cx: &mut TestAppContext, keys: &str) {
@@ -151,13 +291,13 @@ impl Fixture {
         cx.simulate_keystrokes(self.window, keys);
         // Let a closing dialog finish its animation and hand focus back.
         cx.executor().advance_clock(Duration::from_millis(500));
-        cx.run_until_parked();
+        self.quiet(cx);
     }
 
     fn type_text(&self, cx: &mut TestAppContext, text: &str) {
         self.draw(cx);
         cx.simulate_input(self.window, text);
-        cx.run_until_parked();
+        self.quiet(cx);
     }
 
     /// Focuses a pane, as clicking into it would.
@@ -168,10 +308,9 @@ impl Fixture {
             window.focus(&focus, cx);
         })
         .unwrap();
-        cx.run_until_parked();
-        // The workspace learns which pane is active from a focus event,
-        // which gpui dispatches at the end of the next frame.
-        self.settle(cx, "the pane to become the active one", move |ws, _| ws.active_side() == side);
+        // The pane tells the core from its focus event, which gpui
+        // dispatches at the end of the next frame.
+        self.settle(cx, "the pane to become the active one", move |view, _| view.active == side);
     }
 
     fn pane(&self, cx: &mut TestAppContext, side: Side) -> Entity<FilePane> {
@@ -179,45 +318,74 @@ impl Fixture {
         cx.update(|cx| ws.read(cx).pane(side).clone())
     }
 
+    /// The rows a pane lists (or the marked ones), sorted.
     fn names(&self, cx: &mut TestAppContext, side: Side, marked: bool) -> Vec<String> {
-        let pane = self.pane(cx, side);
-        cx.update(|cx| {
-            let pane = pane.read(cx);
-            let names = if marked {
-                pane.marked()
-            } else {
-                pane.listed_entries().into_iter().map(|e| e.name).collect()
-            };
-            let mut names: Vec<String> = names.iter().map(|n| String::from_utf8_lossy(n).into_owned()).collect();
-            names.sort();
-            names
-        })
+        let view = self.view(cx);
+        let pane = pane_view(&view, side);
+        let mut names = listed(pane);
+        if marked {
+            names.retain(|n| pane.marked.contains(n.as_bytes()));
+        }
+        names.sort();
+        names
     }
 
-    /// Focuses the left pane and puts its cursor on `name`.
+    /// The rows as drawn, in order, which is what a sort setting changes.
+    fn row_names(&self, cx: &mut TestAppContext, side: Side) -> Vec<String> {
+        let view = self.view(cx);
+        listed(pane_view(&view, side))
+    }
+
+    fn filter(&self, cx: &mut TestAppContext, side: Side) -> String {
+        self.view(cx).panes[side.index()].filter.clone()
+    }
+
+    /// Focuses the left pane and puts its cursor on `name`, nothing marked.
     fn select(&self, cx: &mut TestAppContext, name: &str) {
-        self.focus(cx, Side::Left);
-        let pane = self.pane(cx, Side::Left);
-        cx.update(|cx| pane.update(cx, |p, cx| p.reload_select(name.as_bytes().to_vec(), cx)));
-        let expected = name.to_string();
-        self.settle(cx, "the cursor to move", move |ws, cx| {
-            let pane = ws.pane(Side::Left).read(cx);
-            !pane.is_loading() && pane.cursor_row().is_some_and(|r| r.name.as_ref() == expected)
+        self.select_in(cx, Side::Left, name);
+    }
+
+    /// Focuses a pane, unmarks what is marked (⌘⇧A) and clicks the row
+    /// called `name`, once the pane lists it (a file just made shows up
+    /// when the watcher has seen it). With nothing marked, a command acts
+    /// on the row under the cursor.
+    fn select_in(&self, cx: &mut TestAppContext, side: Side, name: &str) {
+        self.focus(cx, side);
+        if !self.view(cx).panes[side.index()].marked.is_empty() {
+            self.dispatch(cx, UnmarkAll);
+        }
+        self.click(cx, side, name, false);
+    }
+
+    /// A click on the row called `name`; `toggle` is ⌘-click, which marks
+    /// or unmarks it. Waits for the row to be listed first.
+    fn click(&self, cx: &mut TestAppContext, side: Side, name: &str, toggle: bool) {
+        let wanted = name.to_string();
+        self.settle(cx, &format!("{name} to be listed"), |view, _| {
+            let pane = pane_view(view, side);
+            !pane.loading && listed(pane).contains(&wanted)
+        });
+        let view = self.view(cx);
+        let pane = pane_view(&view, side);
+        let row = pane
+            .order
+            .iter()
+            .position(|&ix| ix != PARENT && pane.listing.names.get(ix as usize) == Some(&wanted))
+            .unwrap();
+        self.send(cx, Event::Pane(side, PaneInput::Click { row, toggle, range: false }));
+        self.settle(cx, "the cursor to move", |view, _| {
+            cursor_name(pane_view(view, side)).as_deref() == Some(name)
         });
     }
 
-    /// The saved folders of the host a pane is on, as (name, path).
+    /// The saved folders on the row of a pane, as (name, path).
     fn places(&self, cx: &mut TestAppContext, side: Side) -> Vec<(String, String)> {
-        let pane = self.pane(cx, side);
-        cx.update(|cx| {
-            let host = pane.read(cx).host_key();
-            cx.global::<app_state::AppState>()
-                .bookmarks
-                .places(&host)
-                .into_iter()
-                .map(|p| (p.name, p.path.display()))
-                .collect()
-        })
+        let view = self.view(cx);
+        pane_view(&view, side)
+            .places
+            .iter()
+            .map(|p| (p.name.clone(), p.path.display()))
+            .collect()
     }
 
     /// Where the file list starts, which says whether a row above it is
@@ -225,53 +393,40 @@ impl Fixture {
     fn list_top(&self, cx: &mut TestAppContext, side: Side) -> f32 {
         self.draw(cx);
         let pane = self.pane(cx, side);
-        cx.update(|cx| f32::from(pane.read(cx).list_origin.y))
-    }
-
-    /// Whether the pane draws the row at all.
-    fn has_places(&self, cx: &mut TestAppContext, side: Side) -> bool {
-        let pane = self.pane(cx, side);
-        cx.update(|cx| pane.read(cx).has_places(cx))
-    }
-
-    /// The rows as drawn, in order, which is what a sort setting changes.
-    fn row_names(&self, cx: &mut TestAppContext, side: Side) -> Vec<String> {
-        let pane = self.pane(cx, side);
-        cx.update(|cx| {
-            pane.read(cx)
-                .listed_entries()
-                .iter()
-                .map(|e| String::from_utf8_lossy(&e.name).into_owned())
-                .collect()
-        })
+        cx.update(|cx| pane.read(cx).list_top())
     }
 
     /// What quick look is showing, once it has settled on a file.
-    fn preview(&self, cx: &mut TestAppContext) -> crate::quick_look::Preview {
-        self.settle(cx, "the preview to be read", |ws, cx| {
-            ws.quick_look()
-                .is_some_and(|view| view.read(cx).preview(cx) != crate::quick_look::Preview::Reading)
+    fn preview(&self, cx: &mut TestAppContext) -> Preview {
+        self.settle(cx, "the preview to be read", |view, _| {
+            view.quick_look.as_ref().is_some_and(|ql| ql.body != Body::Reading)
         });
-        let ws = self.ws.clone();
-        cx.update(|cx| ws.read(cx).quick_look().unwrap().read(cx).preview(cx))
+        preview_of(&self.view(cx).quick_look.as_ref().unwrap().body)
     }
 
     fn preview_name(&self, cx: &mut TestAppContext) -> Option<String> {
-        let ws = self.ws.clone();
-        cx.update(|cx| ws.read(cx).quick_look()?.read(cx).preview_name())
+        self.view(cx).quick_look.as_ref().map(|ql| ql.name.clone())
+    }
+
+    /// The side quick look is drawn on, if it is on.
+    fn quick_look_side(&self, cx: &mut TestAppContext) -> Option<Side> {
+        let view = self.view(cx);
+        let side = view.quick_look.as_ref()?.side;
+        // The window draws it in place of the pane without the keyboard.
+        assert_ne!(side, view.active, "quick look covers the pane the keyboard is in");
+        Some(side)
     }
 
     fn dialog_open(&self, cx: &mut TestAppContext) -> bool {
         self.draw(cx);
-        cx.update_window(self.window, |_, window, cx| {
-            gpui_kit::component::WindowExt::has_active_dialog(window, cx)
-        })
-        .unwrap_or(false)
+        cx.update_window(self.window, |_, window, cx| gpui_kit::component::WindowExt::has_active_dialog(window, cx))
+            .unwrap_or(false)
     }
 
     /// The settings as they are on disk, which is what the next run reads.
-    fn saved_settings(&self) -> crate::settings::Settings {
-        crate::settings::Settings::load(&self.root.join("state/settings.json"))
+    fn saved_settings(&self) -> Settings {
+        let bytes = fs::read(self.root.join("state/settings.json")).unwrap();
+        serde_json::from_slice(&bytes).unwrap()
     }
 
     fn files(&self, dir: &str) -> Vec<String> {
@@ -300,6 +455,17 @@ fn compare_marks_what_differs(cx: &mut TestAppContext) {
     assert_eq!(f.names(cx, Side::Right, true), ["only-right.txt"]);
 }
 
+/// Marks `names` in the left pane: a ⌘-click on each.
+fn mark(f: &Fixture, cx: &mut TestAppContext, names: &[&str]) {
+    f.focus(cx, Side::Left);
+    for name in names {
+        f.click(cx, Side::Left, name, true);
+    }
+    let mut want: Vec<String> = names.iter().map(|n| n.to_string()).collect();
+    want.sort();
+    assert_eq!(f.names(cx, Side::Left, true), want);
+}
+
 #[gpui::test]
 fn multi_rename_renames_the_marked_files(cx: &mut TestAppContext) {
     let f = open(cx, |root| {
@@ -307,8 +473,7 @@ fn multi_rename_renames_the_marked_files(cx: &mut TestAppContext) {
         write(&root.join("left/IMG_2.JPG"), "2", 1);
         write(&root.join("left/keep.txt"), "k", 1);
     });
-    let pane = f.pane(cx, Side::Left);
-    cx.update(|cx| pane.update(cx, |p, cx| p.set_marks(vec![b"IMG_1.JPG".to_vec(), b"IMG_2.JPG".to_vec()], cx)));
+    mark(&f, cx, &["IMG_1.JPG", "IMG_2.JPG"]);
     f.focus(cx, Side::Left);
     f.dispatch(cx, MultiRename);
     // The name mask has focus with its text selected: typing replaces it.
@@ -318,10 +483,11 @@ fn multi_rename_renames_the_marked_files(cx: &mut TestAppContext) {
     f.settle(cx, "the renames", move |_, _| root.join("left/photo-2.JPG").exists());
     assert_eq!(f.files("left"), ["keep.txt", "photo-1.JPG", "photo-2.JPG"]);
     assert_eq!(read(f.root.join("left/photo-1.JPG")), "1");
+    assert_eq!(read(f.root.join("left/photo-2.JPG")), "2");
     // The pane lists the new names.
-    f.settle(cx, "the pane to reload", |ws, cx| {
-        let pane = ws.pane(Side::Left).read(cx);
-        !pane.is_loading() && pane.listed_entries().iter().any(|e| e.name == b"photo-1.JPG")
+    f.settle(cx, "the pane to reload", |view, _| {
+        let pane = pane_view(view, Side::Left);
+        !pane.loading && listed(pane) == ["keep.txt", "photo-1.JPG", "photo-2.JPG"]
     });
 }
 
@@ -331,20 +497,23 @@ fn multi_rename_keeps_the_dialog_open_on_clashes(cx: &mut TestAppContext) {
         write(&root.join("left/a.txt"), "a", 1);
         write(&root.join("left/b.txt"), "b", 1);
     });
-    let pane = f.pane(cx, Side::Left);
-    cx.update(|cx| pane.update(cx, |p, cx| p.set_marks(vec![b"a.txt".to_vec(), b"b.txt".to_vec()], cx)));
+    mark(&f, cx, &["a.txt", "b.txt"]);
     f.focus(cx, Side::Left);
     f.dispatch(cx, MultiRename);
     // Both would be called "same.txt": Enter must not rename (nor close).
     f.type_text(cx, "same");
     f.keys(cx, "enter");
-    for _ in 0..20 {
-        cx.run_until_parked();
-        std::thread::sleep(Duration::from_millis(5));
-    }
     assert_eq!(f.files("left"), ["a.txt", "b.txt"]);
-    let open = cx.update_window(f.window, |_, window, cx| gpui_kit::component::WindowExt::has_active_dialog(window, cx));
-    assert_eq!(open.ok(), Some(true));
+    let view = f.view(cx);
+    match view.dialogs.last().map(|d| &d.kind) {
+        // The mask did reach the dialog: it is the clash that stops it.
+        Some(DialogKind::Rename(rename)) => {
+            assert_eq!(rename.name, "same");
+            assert_eq!(rename.to_rename, 0, "{:?}", rename.preview);
+        }
+        other => panic!("the core closed the dialog: {other:?}"),
+    }
+    assert!(f.dialog_open(cx), "and the window still shows it");
 }
 
 #[gpui::test]
@@ -359,21 +528,24 @@ fn sync_copies_both_ways(cx: &mut TestAppContext) {
     f.focus(cx, Side::Left);
     f.dispatch(cx, SyncDirs);
     // Enter synchronizes as soon as the comparison is done.
+    f.settle(cx, "the comparison", |view, _| {
+        view.dialogs.iter().any(|d| match &d.kind {
+            DialogKind::Sync(sync) => sync.comparing.is_none() && sync.plan.is_some(),
+            _ => false,
+        })
+    });
+    f.keys(cx, "enter");
     let root = f.root.clone();
-    for _ in 0..400 {
-        f.keys(cx, "enter");
-        if root.join("right/a.txt").exists() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
     f.settle(cx, "the sync", move |_, _| {
         root.join("left/b.txt").exists()
+            && root.join("right/a.txt").exists()
             && root.join("right/new-dir/deep/x.txt").exists()
             && read(root.join("right/docs/n.txt")) == "newer"
     });
     assert_eq!(read(f.root.join("left/docs/n.txt")), "newer");
     assert_eq!(read(f.root.join("right/a.txt")), "only left");
+    assert_eq!(read(f.root.join("left/b.txt")), "only right");
+    assert_eq!(read(f.root.join("right/new-dir/deep/x.txt")), "x");
 }
 
 #[gpui::test]
@@ -393,12 +565,12 @@ fn archives_open_as_folders_extract_and_pack(cx: &mut TestAppContext) {
     // Enter opens the archive as a folder.
     f.select(cx, "site.tar.gz");
     f.dispatch(cx, Open);
-    f.settle(cx, "the archive to open", |ws, cx| {
-        let pane = ws.pane(Side::Left).read(cx);
-        pane.location().vfs.host().is_some() && !pane.is_loading() && pane.listed_entries().len() == 2
+    f.settle(cx, "the archive to open", |view, _| {
+        let pane = pane_view(view, Side::Left);
+        pane.kind == LocationKind::Archive && !pane.loading && listed(pane).len() == 2
     });
     assert_eq!(f.names(cx, Side::Left, false), ["README", "www"]);
-    let title = cx.update(|cx| f.ws.read(cx).pane(Side::Left).read(cx).location().display());
+    let title = f.view(cx).panes[0].display.clone();
     assert!(title.ends_with("/left/site.tar.gz"), "{title}");
 
     // F5 extracts into the other pane (Enter accepts the target).
@@ -412,11 +584,9 @@ fn archives_open_as_folders_extract_and_pack(cx: &mut TestAppContext) {
     // `..` at the archive's root goes back to its folder, onto the archive
     // (the prompt gave the keyboard back to the pane when it closed).
     f.dispatch(cx, GoParent);
-    f.settle(cx, "leaving the archive", |ws, cx| {
-        let pane = ws.pane(Side::Left).read(cx);
-        pane.location().vfs.host().is_none()
-            && !pane.is_loading()
-            && pane.cursor_row().is_some_and(|r| r.name.as_ref() == "site.tar.gz")
+    f.settle(cx, "leaving the archive", |view, _| {
+        let pane = pane_view(view, Side::Left);
+        pane.kind == LocationKind::Local && !pane.loading && cursor_name(pane).as_deref() == Some("site.tar.gz")
     });
 
     // ⌥F9 unpacks the whole archive into a new folder of the other pane.
@@ -427,6 +597,7 @@ fn archives_open_as_folders_extract_and_pack(cx: &mut TestAppContext) {
     f.settle(cx, "unpacking", move |_, _| {
         root.join("right/unpacked/README").exists() && root.join("right/unpacked/www/index.html").exists()
     });
+    assert_eq!(read(f.root.join("right/unpacked/README")), "readme");
 
     // ⌥F5 packs the selection into a new archive in the other pane.
     f.select(cx, "keep.txt");
@@ -434,36 +605,21 @@ fn archives_open_as_folders_extract_and_pack(cx: &mut TestAppContext) {
     f.keys(cx, "enter");
     let archive = f.root.join("right/keep.tar.gz");
     let path = archive.clone();
-    f.settle(cx, "packing", move |_, _| {
-        std::process::Command::new("tar")
-            .arg("-tzf")
-            .arg(&path)
-            .output()
-            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("keep.txt"))
-    });
+    f.settle(cx, "packing", move |_, _| tar_members(&path).contains("keep.txt"));
 
     // Copying into an archive pane adds to the archive.
-    let right = f.pane(cx, Side::Right);
-    let file = tl_core::VPath::from_local(&archive);
-    cx.update(|cx| right.update(cx, |p, cx| p.navigate(file.parent().unwrap(), Some(b"keep.tar.gz".to_vec()), cx)));
-    f.settle(cx, "the right pane", |ws, cx| !ws.pane(Side::Right).read(cx).is_loading());
-    f.focus(cx, Side::Right);
+    f.select_in(cx, Side::Right, "keep.tar.gz");
     f.dispatch(cx, Open);
-    f.settle(cx, "the right archive to open", |ws, cx| {
-        let pane = ws.pane(Side::Right).read(cx);
-        pane.location().vfs.host().is_some() && !pane.is_loading()
+    f.settle(cx, "the right archive to open", |view, _| {
+        let pane = pane_view(view, Side::Right);
+        pane.kind == LocationKind::Archive && !pane.loading && listed(pane) == ["keep.txt"]
     });
     f.select(cx, "site.tar.gz");
     f.dispatch(cx, CopyFiles);
     f.keys(cx, "enter");
     let path = archive.clone();
-    f.settle(cx, "adding to the archive", move |_, _| {
-        std::process::Command::new("tar")
-            .arg("-tzf")
-            .arg(&path)
-            .output()
-            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("site.tar.gz"))
-    });
+    f.settle(cx, "adding to the archive", move |_, _| tar_members(&path).contains("site.tar.gz"));
+    assert!(tar_members(&archive).contains("keep.txt"), "what was in the archive stays in it");
 }
 
 /// A plugin that is written but never registered is invisible in the app,
@@ -471,42 +627,60 @@ fn archives_open_as_folders_extract_and_pack(cx: &mut TestAppContext) {
 #[gpui::test]
 fn every_provider_is_registered_and_its_fields_make_sense(cx: &mut TestAppContext) {
     let f = open(cx, |_| {});
-    let _ = &f;
-    cx.update(|cx| {
-        let registry = &cx.global::<app_state::AppState>().registry;
-        let mut ids: Vec<&str> = registry.all().iter().map(|p| p.id()).collect();
-        ids.sort();
-        assert_eq!(ids, ["local", "s3", "ssh", "webdav"]);
+    let plugins = f.view(cx).plugins.clone();
+    let mut ids: Vec<&str> = plugins.iter().map(|p| p.id.as_str()).collect();
+    ids.sort();
+    assert_eq!(ids, ["local", "s3", "ssh", "webdav"]);
 
-        for plugin in registry.all() {
-            let fields = plugin.fields();
-            assert!(!plugin.name().is_empty(), "{} has no name", plugin.id());
-            let mut keys: Vec<&str> = fields.iter().map(|f| f.key).collect();
-            keys.sort();
-            let unique = keys.len();
-            keys.dedup();
-            assert_eq!(keys.len(), unique, "{} repeats a field key", plugin.id());
-            // The bookmark editor shows whatever a plugin declares, so a
-            // field with no label is a blank row in the dialog.
-            assert!(
-                fields.iter().all(|f| !f.label.is_empty()),
-                "{} has a field with no label",
-                plugin.id()
-            );
-            // An empty bookmark is what the editor starts with. A plugin
-            // with no required field may well accept it — an S3 bookmark
-            // with nothing filled in means Amazon with the credentials
-            // already on this machine — but one that insists on a field
-            // has to say what is missing rather than try to connect.
-            if fields.iter().any(|f| f.required) {
-                assert!(
-                    plugin.validate(&Default::default()).is_err(),
-                    "{} accepts an empty bookmark although a field is required",
-                    plugin.id()
-                );
+    for plugin in plugins.iter() {
+        assert!(!plugin.name.is_empty(), "{} has no name", plugin.id);
+        let mut keys: Vec<&str> = plugin.fields.iter().map(|f| f.key.as_str()).collect();
+        keys.sort();
+        let unique = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), unique, "{} repeats a field key", plugin.id);
+        // The bookmark editor shows whatever a plugin declares, so a field
+        // with no label is a blank row in the dialog.
+        assert!(plugin.fields.iter().all(|f| !f.label.is_empty()), "{} has a field with no label", plugin.id);
+    }
+
+    // An empty bookmark is what the editor starts with. A plugin with no
+    // required field may well accept it — an S3 bookmark with nothing
+    // filled in means Amazon with the credentials already on this machine —
+    // but one that insists on a field has to say what is missing rather
+    // than try to connect. First the plugins' own checks, which the runtime
+    // asks when a bookmark is saved…
+    let registry = tl_runtime::default_plugins();
+    for plugin in plugins.iter().filter(|p| p.fields.iter().any(|f| f.required)) {
+        let own = registry.get(&plugin.id).unwrap_or_else(|| panic!("{} is not in the registry", plugin.id));
+        assert!(
+            own.validate(&Default::default()).is_err(),
+            "{} accepts an empty bookmark although a field is required",
+            plugin.id
+        );
+    }
+
+    // …then the editor itself: saving an empty bookmark of such a type
+    // keeps the dialog open with the reason under the fields, and saves
+    // nothing.
+    f.dispatch(cx, NewBookmark);
+    let dialog = f.view(cx).dialogs.last().map(|d| d.id).expect("the bookmark editor");
+    for plugin in plugins.iter().filter(|p| p.fields.iter().any(|f| f.required)) {
+        use tl_app::bookmarks::BookmarksInput;
+        f.send(cx, Event::Bookmarks(BookmarksInput::Plugin { dialog, plugin: plugin.id.clone() }));
+        f.send(cx, Event::Bookmarks(BookmarksInput::Save { dialog, open: false }));
+        let view = f.view(cx);
+        let editor = view.dialogs.iter().find(|d| d.id == dialog).map(|d| &d.kind);
+        match editor {
+            Some(DialogKind::BookmarkEdit(edit)) => {
+                assert_eq!(edit.plugin, plugin.id);
+                assert!(edit.error.is_some(), "{}: an empty bookmark is saved without a word", plugin.id);
             }
+            other => panic!("{}: the editor closed on an empty bookmark ({other:?})", plugin.id),
         }
-    });
+        assert!(view.bookmarks.bookmarks.is_empty(), "{}: an empty bookmark was saved", plugin.id);
+    }
+    assert!(f.dialog_open(cx));
 }
 
 /// The row of saved folders under the location line: one row per host, and
@@ -517,33 +691,34 @@ fn the_places_row_saves_and_switches_folders(cx: &mut TestAppContext) {
         for dir in ["left/logs", "left/config"] {
             fs::create_dir_all(root.join(dir)).unwrap();
         }
+        // A folder saved on a server: it never shows up on this machine's
+        // row.
+        let mut bookmarks = tl_app::tl_model::Bookmarks::default();
+        bookmarks.add_place(tl_core::Place::new("deploy@web-1:22", "etc", tl_core::VPath::parse("/etc")));
+        tl_core::bookmark::write(&root.join("state/bookmarks.json"), &bookmarks).unwrap();
     });
     let left = f.root.join("left");
     let enter = |f: &Fixture, cx: &mut TestAppContext, name: &str| {
         f.select(cx, name);
         f.dispatch(cx, Open);
-        let want = tl_core::VPath::from_local(&left.join(name));
-        f.settle(cx, "the pane to enter the folder", move |ws, cx| {
-            let pane = ws.pane(Side::Left).read(cx);
-            !pane.is_loading() && pane.location().path == want
+        let want = left.join(name);
+        f.settle(cx, "the pane to enter the folder", move |view, _| {
+            !pane_view(view, Side::Left).loading && pane_dir(view, Side::Left) == want
         });
     };
 
-    // Nothing is saved yet, so there is no row to draw.
-    assert!(!f.has_places(cx, Side::Left));
+    // Nothing is saved for this host, so there is no row to draw (the
+    // server's folder is known, just not here).
+    assert_eq!(f.view(cx).bookmarks.places.len(), 1, "the server's folder was read");
+    assert!(f.places(cx, Side::Left).is_empty());
     let list_top = f.list_top(cx, Side::Left);
 
     // ⌘D saves the folder the pane is in, named after it.
     enter(&f, cx, "logs");
     f.dispatch(cx, TogglePlace);
-    assert_eq!(
-        f.places(cx, Side::Left),
-        [("logs".into(), left.join("logs").display().to_string())]
-    );
-    assert!(f.has_places(cx, Side::Left));
+    assert_eq!(f.places(cx, Side::Left), [("logs".into(), left.join("logs").display().to_string())]);
     // And the row really takes a strip of the pane, pushing the file list
     // down by its own height.
-    f.settle(cx, "the row to appear", |_, _| true);
     let with_row = f.list_top(cx, Side::Left);
     assert!(
         with_row - list_top > 18. && with_row - list_top < 32.,
@@ -561,36 +736,30 @@ fn the_places_row_saves_and_switches_folders(cx: &mut TestAppContext) {
 
     // ⌘1 and ⌘2 switch between them from anywhere on the host.
     f.dispatch(cx, GoParent);
-    f.settle(cx, "the pane to leave config", |ws, cx| {
-        !ws.pane(Side::Left).read(cx).is_loading()
-    });
+    let up = left.clone();
+    f.settle(cx, "the pane to leave config", move |view, _| pane_dir(view, Side::Left) == up);
     f.dispatch(cx, GoToPlace { index: 0 });
-    f.settle(cx, "⌘1 to go to logs", |ws, cx| {
-        let pane = ws.pane(Side::Left).read(cx);
-        !pane.is_loading() && pane.location().path.file_name() == Some(b"logs")
+    let logs = left.join("logs");
+    f.settle(cx, "⌘1 to go to logs", move |view, _| {
+        !pane_view(view, Side::Left).loading && pane_dir(view, Side::Left) == logs
     });
     f.dispatch(cx, GoToPlace { index: 1 });
-    f.settle(cx, "⌘2 to go to config", |ws, cx| {
-        let pane = ws.pane(Side::Left).read(cx);
-        !pane.is_loading() && pane.location().path.file_name() == Some(b"config")
+    let config = left.join("config");
+    f.settle(cx, "⌘2 to go to config", move |view, _| {
+        !pane_view(view, Side::Left).loading && pane_dir(view, Side::Left) == config
     });
     // A number with nothing behind it does nothing at all.
     f.dispatch(cx, GoToPlace { index: 7 });
-    f.settle(cx, "the pane to stay put", |ws, cx| {
-        let pane = ws.pane(Side::Left).read(cx);
-        !pane.is_loading() && pane.location().path.file_name() == Some(b"config")
-    });
+    assert_eq!(pane_dir(&f.view(cx), Side::Left), left.join("config"), "the pane stays put");
 
     // ⌘D again takes the folder off the row, and leaves the other one.
     f.dispatch(cx, TogglePlace);
     let names: Vec<String> = f.places(cx, Side::Left).into_iter().map(|(n, _)| n).collect();
     assert_eq!(names, ["logs"]);
 
-    // Another host's folders never show up here.
-    cx.update(|cx| {
-        let place = tl_core::Place::new("deploy@web-1:22", "etc", tl_core::VPath::parse("/etc"));
-        cx.global_mut::<app_state::AppState>().bookmarks.add_place(place).unwrap();
-    });
+    // Another host's folders never show up here, and are kept all along.
+    let view = f.view(cx);
+    assert!(view.bookmarks.places.iter().any(|p| p.host == "deploy@web-1:22"));
     let names: Vec<String> = f.places(cx, Side::Left).into_iter().map(|(n, _)| n).collect();
     assert_eq!(names, ["logs"]);
 }
@@ -617,30 +786,15 @@ fn packs_and_extracts_a_set_of_folders(cx: &mut TestAppContext) {
     f.keys(cx, "enter");
     let archive = f.root.join("right/left.tar.gz");
     let path = archive.clone();
-    f.settle(cx, "packing the folders", move |_, _| {
-        std::process::Command::new("tar")
-            .arg("-tzf")
-            .arg(&path)
-            .output()
-            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("two/c.txt"))
-    });
-    let listing = String::from_utf8_lossy(
-        &std::process::Command::new("tar").arg("-tzf").arg(&archive).output().unwrap().stdout,
-    )
-    .into_owned();
+    f.settle(cx, "packing the folders", move |_, _| tar_members(&path).contains("two/c.txt"));
+    let listing = tar_members(&archive);
     for member in ["one/a.txt", "one/deep/b.txt", "two/c.txt"] {
         assert!(listing.contains(member), "{member} is missing from {listing}");
     }
     assert!(!listing.contains("loose.txt"), "only the marked folders go in: {listing}");
 
     // ⌥F9 from the other side unpacks the whole thing back.
-    f.focus(cx, Side::Right);
-    let right = f.pane(cx, Side::Right);
-    cx.update(|cx| right.update(cx, |p, cx| p.reload_select(b"left.tar.gz".to_vec(), cx)));
-    f.settle(cx, "the cursor on the archive", |ws, cx| {
-        let pane = ws.pane(Side::Right).read(cx);
-        !pane.is_loading() && pane.cursor_row().is_some_and(|r| r.name.as_ref() == "left.tar.gz")
-    });
+    f.select_in(cx, Side::Right, "left.tar.gz");
     f.dispatch(cx, ExtractArchive);
     f.type_text(cx, "back");
     f.keys(cx, "enter");
@@ -670,13 +824,7 @@ fn compresses_and_decompresses_in_the_same_folder(cx: &mut TestAppContext) {
     f.keys(cx, "enter");
     let archive = f.root.join("left/left.tar.gz");
     let path = archive.clone();
-    f.settle(cx, "compressing in place", move |_, _| {
-        std::process::Command::new("tar")
-            .arg("-tzf")
-            .arg(&path)
-            .output()
-            .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("two/deep/b.txt"))
-    });
+    f.settle(cx, "compressing in place", move |_, _| tar_members(&path).contains("two/deep/b.txt"));
     assert_eq!(
         f.files("right"),
         Vec::<String>::new(),
@@ -701,8 +849,8 @@ fn compresses_and_decompresses_in_the_same_folder(cx: &mut TestAppContext) {
 /// replaces was exactly a pair of highlights that looked the same.
 #[gpui::test]
 fn the_active_pane_stands_out_in_both_themes(cx: &mut TestAppContext) {
-    use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
     use gpui_kit::Hsla;
+    use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode};
 
     /// Lightness and colourfulness of `top` drawn over `under`.
     fn over(top: Hsla, under: Hsla) -> (f32, f32) {
@@ -771,10 +919,6 @@ fn typing_filters_the_list(cx: &mut TestAppContext) {
         fs::create_dir_all(root.join("left/logs")).unwrap();
         fs::create_dir_all(root.join("left/images")).unwrap();
     });
-    let filter = |cx: &mut TestAppContext| {
-        let pane = f.pane(cx, Side::Left);
-        cx.update(|cx| pane.read(cx).filter().to_string())
-    };
 
     f.focus(cx, Side::Left);
     assert_eq!(
@@ -785,37 +929,35 @@ fn typing_filters_the_list(cx: &mut TestAppContext) {
     // The whole name is matched, extension included, and folders are in
     // it too.
     f.type_text(cx, "log");
-    assert_eq!(filter(cx), "log");
-    assert_eq!(
-        f.names(cx, Side::Left, false),
-        ["app.log", "db.log", "logrotate.conf", "logs"]
-    );
+    assert_eq!(f.filter(cx, Side::Left), "log");
+    assert_eq!(f.names(cx, Side::Left, false), ["app.log", "db.log", "logrotate.conf", "logs"]);
 
     // A wildcard matches the name end to end, so only the extension is
     // left — which a plain substring cannot express.
     f.type_text(cx, "s");
     assert_eq!(f.names(cx, Side::Left, false), ["logs"]);
     f.keys(cx, "backspace");
-    assert_eq!(filter(cx), "log");
+    assert_eq!(f.filter(cx, Side::Left), "log");
     f.type_text(cx, "*.log");
-    assert_eq!(filter(cx), "log*.log");
+    assert_eq!(f.filter(cx, Side::Left), "log*.log");
     f.keys(cx, "backspace backspace backspace backspace backspace backspace backspace backspace");
-    assert_eq!(filter(cx), "", "eight characters, eight backspaces");
+    assert_eq!(f.filter(cx, Side::Left), "", "eight characters, eight backspaces");
     f.type_text(cx, "*.log");
     assert_eq!(f.names(cx, Side::Left, false), ["app.log", "db.log"]);
 
     // Escape puts everything back.
     f.keys(cx, "escape");
-    assert_eq!(filter(cx), "");
+    assert_eq!(f.filter(cx, Side::Left), "");
     assert_eq!(f.names(cx, Side::Left, false).len(), 6);
 
     // With no filter to shorten, backspace is still "go to the enclosing
     // folder".
     f.keys(cx, "backspace");
-    f.settle(cx, "the pane to go up", |ws, cx| {
-        let pane = ws.pane(Side::Left).read(cx);
-        !pane.is_loading() && pane.location().path.file_name() != Some(b"left")
+    let root = f.root.clone();
+    f.settle(cx, "the pane to go up", move |view, _| {
+        !pane_view(view, Side::Left).loading && pane_dir(view, Side::Left) == root
     });
+    assert_eq!(cursor_name(pane_view(&f.view(cx), Side::Left)).as_deref(), Some("left"));
 }
 
 /// A filter is a view, so marking inside one and acting on it has to do
@@ -847,71 +989,23 @@ fn marks_and_operations_follow_the_filter(cx: &mut TestAppContext) {
     f.dispatch(cx, CopyFiles);
     f.keys(cx, "enter");
     let root = f.root.clone();
-    f.settle(cx, "the copy", move |_, _| root.join("right/db.log").exists());
+    f.settle(cx, "the copy", move |_, _| root.join("right/db.log").exists() && root.join("right/app.log").exists());
     assert_eq!(f.files("right"), ["app.log", "db.log"]);
 
     // And the filter is still on, with the marks still in it.
-    let pane = f.pane(cx, Side::Left);
-    assert_eq!(cx.update(|cx| pane.read(cx).filter().to_string()), "*.log");
+    assert_eq!(f.filter(cx, Side::Left), "*.log");
     assert_eq!(f.names(cx, Side::Left, true), ["app.log", "db.log"]);
-}
-
-#[gpui::test]
-fn a_rebound_key_moves_the_command_and_the_old_key_goes_quiet(cx: &mut TestAppContext) {
-    let f = open(cx, |root| write(&root.join("left/.hidden"), "h", 1));
-    f.focus(cx, Side::Left);
-
-    assert_eq!(advertised(cx, &f, &ToggleHidden), as_spelled(["cmd-shift-.", "cmd->"]));
-
-    // The default key works, and the file list follows it.
-    f.keys(cx, "cmd-shift-.");
-    assert!(cx.update(|cx| hidden(cx)));
-    assert_eq!(f.row_names(cx, Side::Left), [".hidden"]);
-    f.keys(cx, "cmd-shift-.");
-    assert!(!cx.update(|cx| hidden(cx)));
-
-    // Move it to F9.
-    cx.update(|cx| {
-        crate::settings::update(cx, |settings| {
-            settings.keys.insert("toggle-hidden".into(), vec!["f9".into()]);
-        });
-        crate::keymap::apply(cx);
-    });
-
-    f.keys(cx, "f9");
-    assert!(cx.update(|cx| hidden(cx)), "F9 is the key now");
-    f.keys(cx, "cmd-shift-.");
-    assert!(
-        cx.update(|cx| hidden(cx)),
-        "the old key must do nothing, not toggle it back"
-    );
-
-    // Menus and tooltips look the binding up in GPUI's key map rather than
-    // in the settings, so it has to agree about which key is gone.
-    assert_eq!(advertised(cx, &f, &ToggleHidden), as_spelled(["f9"]));
-
-    // And the defaults come back.
-    cx.update(|cx| {
-        crate::settings::update(cx, |settings| settings.keys.clear());
-        crate::keymap::apply(cx);
-    });
-    f.keys(cx, "cmd-shift-.");
-    assert!(!cx.update(|cx| hidden(cx)));
-    f.keys(cx, "f9");
-    assert!(!cx.update(|cx| hidden(cx)), "F9 is free again");
 }
 
 /// Keystrokes as this platform spells them: GPUI writes the same modifier
 /// as `cmd-` on macOS and `super-` on Linux, so a literal cannot be
 /// compared against what it hands back.
 fn as_spelled<const N: usize>(keys: [&str; N]) -> Vec<String> {
-    keys.iter()
-        .map(|keys| gpui::Keystroke::parse(keys).unwrap().unparse())
-        .collect()
+    keys.iter().map(|keys| gpui::Keystroke::parse(keys).unwrap().unparse()).collect()
 }
 
-/// The keys GPUI would show for an action in the pane's context, which is
-/// where menu items and tooltips get theirs.
+/// The keys GPUI would show for an action in the workspace's context,
+/// which is where menu items and tooltips get theirs.
 fn advertised(cx: &mut TestAppContext, f: &Fixture, action: &dyn Action) -> Vec<String> {
     f.draw(cx);
     cx.update_window(f.window, |_, window, _| {
@@ -926,8 +1020,57 @@ fn advertised(cx: &mut TestAppContext, f: &Fixture, action: &dyn Action) -> Vec<
     .unwrap()
 }
 
-fn hidden(cx: &App) -> bool {
-    cx.global::<app_state::AppState>().settings.general.show_hidden
+/// Whether hidden files are shown, as the core has it.
+fn hidden(f: &Fixture, cx: &mut TestAppContext) -> bool {
+    f.view(cx).settings.general.show_hidden
+}
+
+#[gpui::test]
+fn a_rebound_key_moves_the_command_and_the_old_key_goes_quiet(cx: &mut TestAppContext) {
+    let f = open(cx, |root| write(&root.join("left/.hidden"), "h", 1));
+    f.focus(cx, Side::Left);
+
+    assert_eq!(advertised(cx, &f, &ToggleHidden), as_spelled(["cmd-shift-.", "cmd->"]));
+
+    // The default key works, and the file list follows it.
+    f.keys(cx, "cmd-shift-.");
+    assert!(hidden(&f, cx));
+    assert_eq!(f.row_names(cx, Side::Left), [".hidden"]);
+    f.keys(cx, "cmd-shift-.");
+    assert!(!hidden(&f, cx));
+    assert_eq!(f.row_names(cx, Side::Left), Vec::<String>::new());
+
+    // Move it to F9, as the settings window does; the shell rebuilds the
+    // key map when the keys in the settings change.
+    f.edit(
+        cx,
+        SettingsEdit::Keys {
+            command: "toggle-hidden".into(),
+            keys: Some(vec!["f9".into()]),
+        },
+    );
+
+    f.keys(cx, "f9");
+    assert!(hidden(&f, cx), "F9 is the key now");
+    f.keys(cx, "cmd-shift-.");
+    assert!(hidden(&f, cx), "the old key must do nothing, not toggle it back");
+
+    // Menus and tooltips look the binding up in GPUI's key map rather than
+    // in the settings, so it has to agree about which key is gone.
+    assert_eq!(advertised(cx, &f, &ToggleHidden), as_spelled(["f9"]));
+
+    // And the defaults come back.
+    f.edit(
+        cx,
+        SettingsEdit::Keys {
+            command: "toggle-hidden".into(),
+            keys: None,
+        },
+    );
+    f.keys(cx, "cmd-shift-.");
+    assert!(!hidden(&f, cx));
+    f.keys(cx, "f9");
+    assert!(!hidden(&f, cx), "F9 is free again");
 }
 
 #[gpui::test]
@@ -935,7 +1078,7 @@ fn applying_the_same_key_map_again_changes_nothing(cx: &mut TestAppContext) {
     // Every row of the keys page resets through `apply`, so a page reset
     // calls it once per command: it has to be free when nothing changed,
     // or the key map would grow by a few hundred bindings each time.
-    let _f = open(cx, |_| {});
+    let f = open(cx, |_| {});
     let count = |cx: &mut TestAppContext| {
         cx.update(|cx| {
             let f5 = vec![gpui::Keystroke::parse("f5").unwrap()];
@@ -950,15 +1093,16 @@ fn applying_the_same_key_map_again_changes_nothing(cx: &mut TestAppContext) {
     assert_eq!(count(cx), before);
 
     // A real change does add to it, and still leaves one binding in force.
-    cx.update(|cx| {
-        crate::settings::update(cx, |settings| {
-            settings.keys.insert("copy-files".into(), vec!["f9".into()]);
-        });
-        crate::keymap::apply(cx);
-    });
+    f.edit(
+        cx,
+        SettingsEdit::Keys {
+            command: "copy-files".into(),
+            keys: Some(vec!["f9".into()]),
+        },
+    );
     assert!(count(cx) > before, "the marker that takes F5 away is a binding too");
     let live = cx
-        .update_window(_f.window, |_, window, _| {
+        .update_window(f.window, |_, window, _| {
             let context = gpui::KeyContext::parse(crate::actions::PANE).unwrap();
             window.bindings_for_action_in_context(&CopyFiles, context).len()
         })
@@ -986,23 +1130,26 @@ fn folders_can_be_sorted_in_with_the_files(cx: &mut TestAppContext) {
         write(&root.join("left/z.txt"), "z", 1);
     });
     assert_eq!(f.row_names(cx, Side::Left), ["m-dir", "a.txt", "z.txt"]);
+    let loads = |f: &Fixture, cx: &mut TestAppContext| f.view(cx).panes[0].listing.entries.clone();
+    let listing = loads(&f, cx);
 
     // No reload: the panes rebuild their rows when the setting changes.
-    cx.update(|cx| crate::settings::update(cx, |s| s.general.folders_first = false));
-    cx.run_until_parked();
+    f.edit(cx, SettingsEdit::FoldersFirst(false));
     assert_eq!(f.row_names(cx, Side::Left), ["a.txt", "m-dir", "z.txt"]);
+    assert!(std::sync::Arc::ptr_eq(&listing, &loads(&f, cx)), "the folder was listed again");
 }
 
 #[gpui::test]
 fn deleting_permanently_asks_even_when_trashing_does_not(cx: &mut TestAppContext) {
     let f = open(cx, |root| write(&root.join("left/gone.txt"), "g", 1));
-    cx.update(|cx| crate::settings::update(cx, |s| s.general.confirm_trash = false));
+    f.edit(cx, SettingsEdit::ConfirmTrash(false));
     f.select(cx, "gone.txt");
     f.dispatch(cx, DeleteFiles);
     assert!(
-        f.dialog_open(cx),
+        matches!(f.view(cx).dialogs.last().map(|d| &d.kind), Some(DialogKind::Confirm(_))),
         "a delete that cannot be undone has to be confirmed, whatever the setting says"
     );
+    assert!(f.dialog_open(cx), "and the window shows the question");
     assert_eq!(f.files("left"), ["gone.txt"], "and nothing is gone yet");
 }
 
@@ -1011,42 +1158,33 @@ fn the_chosen_theme_paints_the_window(cx: &mut TestAppContext) {
     use gpui_kit::component::{ActiveTheme as _, Theme};
 
     let f = open(cx, |_| {});
-    for (mode, theme, name, background) in [
-        (crate::settings::AppearanceMode::Dark, "dark", "Gruvbox Dark", "#282828"),
-        (crate::settings::AppearanceMode::Light, "light", "Solarized Light", "#fdf6e3"),
+    for (mode, dark, name, background) in [
+        (AppearanceMode::Dark, true, "Gruvbox Dark", "#282828"),
+        (AppearanceMode::Light, false, "Solarized Light", "#fdf6e3"),
     ] {
+        // What the settings window sends; the shell applies the theme when
+        // the settings come back changed.
+        if dark {
+            f.edit(cx, SettingsEdit::DarkTheme(name.into()));
+        } else {
+            f.edit(cx, SettingsEdit::LightTheme(name.into()));
+        }
+        f.edit(cx, SettingsEdit::AppearanceMode(mode));
+        let font_size = f.view(cx).settings.general.font_size();
         cx.update(|cx| {
-            crate::settings::update(cx, |settings| {
-                settings.appearance.mode = mode;
-                if theme == "dark" {
-                    settings.appearance.dark = name.to_string();
-                } else {
-                    settings.appearance.light = name.to_string();
-                }
-            });
-            crate::themes::apply(None, cx);
             assert_eq!(cx.theme().theme_name().as_ref(), name);
             assert_eq!(hex(cx.theme().background), background);
             // A theme file carries no font size, so the one the settings
             // ask for has to survive being applied.
-            assert_eq!(
-                f32::from(cx.theme().font_size),
-                cx.global::<app_state::AppState>().settings.general.font_size()
-            );
-            assert_eq!(Theme::global(cx).is_dark(), theme == "dark");
+            assert_eq!(f32::from(cx.theme().font_size), font_size);
+            assert_eq!(Theme::global(cx).is_dark(), dark);
         });
     }
 
     // An unknown theme in a hand-edited file falls back instead of failing.
-    cx.update(|cx| {
-        crate::settings::update(cx, |settings| {
-            settings.appearance.mode = crate::settings::AppearanceMode::Dark;
-            settings.appearance.dark = "Nonesuch".into();
-        });
-        crate::themes::apply(None, cx);
-        assert_eq!(cx.theme().theme_name().as_ref(), crate::themes::DEFAULT_DARK);
-    });
-    let _ = f;
+    f.edit(cx, SettingsEdit::AppearanceMode(AppearanceMode::Dark));
+    f.edit(cx, SettingsEdit::DarkTheme("Nonesuch".into()));
+    cx.update(|cx| assert_eq!(cx.theme().theme_name().as_ref(), crate::themes::DEFAULT_DARK));
 }
 
 /// A colour as the theme file writes it.
@@ -1058,11 +1196,12 @@ fn hex(color: gpui_kit::Hsla) -> String {
 
 #[gpui::test]
 fn the_settings_window_opens_once_and_draws(cx: &mut TestAppContext) {
-    let _f = open(cx, |_| {});
+    let f = open(cx, |_| {});
     let before = cx.update(|cx| cx.windows().len());
-    cx.update(|cx| crate::settings_window::open(cx));
-    cx.run_until_parked();
-    let handle = cx.update(|cx| cx.global::<app_state::AppState>().settings_window);
+    // ⌘, and the menu send the command to the core, which asks the shell
+    // for the window.
+    f.dispatch(cx, OpenSettings);
+    let handle = cx.update(|cx| cx.global::<Shell>().settings_window);
     let handle = handle.expect("the settings window is remembered");
     assert_eq!(cx.update(|cx| cx.windows().len()), before + 1);
 
@@ -1072,26 +1211,24 @@ fn the_settings_window_opens_once_and_draws(cx: &mut TestAppContext) {
     cx.run_until_parked();
 
     // Asking again brings that window forward rather than opening a second.
-    cx.update(|cx| crate::settings_window::open(cx));
-    cx.run_until_parked();
+    f.dispatch(cx, OpenSettings);
     assert_eq!(cx.update(|cx| cx.windows().len()), before + 1);
+    assert_eq!(cx.update(|cx| cx.global::<Shell>().settings_window), Some(handle));
 }
 
 #[gpui::test]
 fn quick_look_previews_what_the_cursor_is_on(cx: &mut TestAppContext) {
-    use crate::quick_look::Preview;
-
     let f = open(cx, |root| {
         write(&root.join("left/notes.txt"), "the quick brown fox\n", 1);
         write(&root.join("left/zzz.bin"), "head\0tail", 1);
         write(&root.join("left/sub/inner.txt"), "inner", 1);
     });
     f.select(cx, "notes.txt");
-    assert!(cx.update(|cx| f.ws.read(cx).quick_look_side()).is_none());
+    assert!(f.quick_look_side(cx).is_none());
 
     f.dispatch(cx, ToggleQuickLook);
     // The preview takes the pane opposite the one with the keyboard.
-    assert_eq!(cx.update(|cx| f.ws.read(cx).quick_look_side()), Some(Side::Right));
+    assert_eq!(f.quick_look_side(cx), Some(Side::Right));
     assert_eq!(f.preview_name(cx).as_deref(), Some("notes.txt"));
     assert_eq!(f.preview(cx), Preview::Text("the quick brown fox\n".into()));
 
@@ -1104,41 +1241,37 @@ fn quick_look_previews_what_the_cursor_is_on(cx: &mut TestAppContext) {
     // Walking into a folder keeps the mode, and the preview follows. The
     // cursor lands on the row above the folder, which has nothing to show.
     f.keys(cx, "enter");
-    f.settle(cx, "the folder to open", |ws, cx| {
-        let pane = ws.pane(Side::Left).read(cx);
-        !pane.is_loading() && pane.listed_entries().iter().any(|e| e.name == b"inner.txt")
+    f.settle(cx, "the folder to open", |view, _| {
+        let pane = pane_view(view, Side::Left);
+        !pane.loading && listed(pane) == ["inner.txt"]
     });
     assert_eq!(f.preview(cx), Preview::Nothing);
     f.keys(cx, "down");
     assert_eq!(f.preview_name(cx).as_deref(), Some("inner.txt"));
     assert_eq!(f.preview(cx), Preview::Text("inner".into()));
-    assert_eq!(cx.update(|cx| f.ws.read(cx).quick_look_side()), Some(Side::Right));
+    assert_eq!(f.quick_look_side(cx), Some(Side::Right));
 
     // And ⌘Y again gives the pane back.
     f.dispatch(cx, ToggleQuickLook);
-    assert!(cx.update(|cx| f.ws.read(cx).quick_look_side()).is_none());
+    assert!(f.quick_look_side(cx).is_none());
 }
 
 #[gpui::test]
 fn quick_look_moves_to_the_other_side_with_the_keyboard(cx: &mut TestAppContext) {
-    use crate::quick_look::Preview;
-
     let f = open(cx, |root| {
         write(&root.join("left/left.txt"), "on the left", 1);
         write(&root.join("right/right.txt"), "on the right", 1);
     });
     f.select(cx, "left.txt");
     f.dispatch(cx, ToggleQuickLook);
-    assert_eq!(cx.update(|cx| f.ws.read(cx).quick_look_side()), Some(Side::Right));
+    assert_eq!(f.quick_look_side(cx), Some(Side::Right));
     assert_eq!(f.preview(cx), Preview::Text("on the left".into()));
 
     // Tab hands the keyboard to the other folder; the preview changes
     // sides with it rather than leaving the pane it was in undrawn.
     f.keys(cx, "tab");
-    f.settle(cx, "the right pane to take the keyboard", |ws, _| {
-        ws.active_side() == Side::Right
-    });
-    assert_eq!(cx.update(|cx| f.ws.read(cx).quick_look_side()), Some(Side::Left));
+    f.settle(cx, "the right pane to take the keyboard", |view, _| view.active == Side::Right);
+    assert_eq!(f.quick_look_side(cx), Some(Side::Left));
     // The right pane's cursor starts on the row above the folder, so the
     // preview empties rather than keeping the file from the other side.
     assert_eq!(f.preview(cx), Preview::Nothing);
@@ -1152,15 +1285,12 @@ fn quick_look_moves_to_the_other_side_with_the_keyboard(cx: &mut TestAppContext)
 
 #[gpui::test]
 fn quick_look_reads_an_image_as_an_image(cx: &mut TestAppContext) {
-    use crate::quick_look::Preview;
-
     // The smallest PNG that decodes: a single transparent pixel.
     const PIXEL: &[u8] = &[
-        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
-        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f,
-        0x15, 0xc4, 0x89, 0x00, 0x00, 0x00, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00,
-        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d, 0xb4, 0x00, 0x00, 0x00, 0x00, 0x49,
-        0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00,
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4, 0x89, 0x00, 0x00, 0x00,
+        0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0d, 0x0a, 0x2d,
+        0xb4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
     ];
     let f = open(cx, |root| {
         fs::write(root.join("left/dot.png"), PIXEL).unwrap();
@@ -1178,22 +1308,32 @@ fn quick_look_reads_an_image_as_an_image(cx: &mut TestAppContext) {
 fn a_folder_that_changes_mid_listing_still_lands_the_cursor(cx: &mut TestAppContext) {
     let f = open(cx, |root| {
         write(&root.join("left/a.txt"), "a", 1);
+        write(&root.join("left/sub/inner.txt"), "i", 1);
         write(&root.join("left/target.txt"), "t", 1);
     });
-    f.select(cx, "a.txt");
+    f.select(cx, "sub");
+    f.dispatch(cx, Open);
+    let sub = f.root.join("left/sub");
+    f.settle(cx, "the pane to enter sub", move |view, _| {
+        !pane_view(view, Side::Left).loading && pane_dir(view, Side::Left) == sub
+    });
+    f.select(cx, "inner.txt");
 
-    let pane = f.pane(cx, Side::Left);
-    let dir = cx.update(|cx| pane.read(cx).location().path.clone());
-    cx.update(|cx| pane.update(cx, |p, cx| p.navigate(dir, Some(b"target.txt".to_vec()), cx)));
-    // The folder changes before that listing comes back — a job finishing,
-    // or anything else the watcher sees — and the listing starts again.
-    f.dispatch(cx, Refresh);
+    // Going up lists the folder with the cursor to land on the one just
+    // left. The folder changes before that listing comes back — a job
+    // finishing, or anything else the watcher sees — and the listing starts
+    // again: both are sent before either is answered.
+    f.draw(cx);
+    cx.dispatch_action(f.window, GoParent);
+    cx.dispatch_action(f.window, Refresh);
 
-    f.settle(cx, "the listing", |ws, cx| !ws.pane(Side::Left).read(cx).is_loading());
-    let cursor = cx.update(|cx| pane.read(cx).cursor_row().map(|r| r.name.to_string()));
+    let left = f.root.join("left");
+    f.settle(cx, "the listing", move |view, _| {
+        !pane_view(view, Side::Left).loading && pane_dir(view, Side::Left) == left
+    });
     assert_eq!(
-        cursor.as_deref(),
-        Some("target.txt"),
+        cursor_name(pane_view(&f.view(cx), Side::Left)).as_deref(),
+        Some("sub"),
         "the second listing dropped the cursor the first was asked to place"
     );
 }
@@ -1227,11 +1367,7 @@ fn the_menu_bar_carries_what_the_desktop_expects(cx: &mut TestAppContext) {
     }
     // Hiding is a macOS idea, and there is nothing to hide behind elsewhere.
     for item in ["Hide Translocator", "Hide Others", "Show All"] {
-        assert_eq!(
-            app_menu.contains(&item.to_string()),
-            cfg!(target_os = "macos"),
-            "{item} in {app_menu:?}"
-        );
+        assert_eq!(app_menu.contains(&item.to_string()), cfg!(target_os = "macos"), "{item} in {app_menu:?}");
     }
 
     let window = menus.iter().find(|menu| menu.name == "Window").unwrap();

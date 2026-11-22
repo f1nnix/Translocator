@@ -5,6 +5,9 @@
 //! people expect (⌘⌫ to trash, ⌘C/⌘V, ⌘[ / ⌘]), all of them rebindable.
 
 use gpui_kit::*;
+use tl_app::model::Command;
+
+use crate::app_state::command;
 
 actions!(
     tl,
@@ -124,11 +127,13 @@ pub const HELP_URL: &str = env!("CARGO_PKG_REPOSITORY");
 /// The commands a desktop expects of any application, wired to the
 /// platform. The rest of the application's actions are handled by the
 /// window that can carry them out; these belong to no window, or to
-/// whichever one is in front.
+/// whichever one is in front. Quit, Settings, Help and About are the
+/// core's commands; the rest are the window system's.
 pub fn handle_system_actions(cx: &mut App) {
-    cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
-    cx.on_action(|_: &OpenSettings, cx: &mut App| crate::settings_window::open(cx));
-    cx.on_action(|_: &OpenHelp, cx: &mut App| cx.open_url(HELP_URL));
+    cx.on_action(|_: &Quit, cx: &mut App| quit(cx));
+    cx.on_action(|_: &OpenSettings, cx: &mut App| command(Command::OpenSettings, cx));
+    cx.on_action(|_: &OpenHelp, cx: &mut App| command(Command::OpenHelp, cx));
+    cx.on_action(|_: &About, cx: &mut App| command(Command::About, cx));
     cx.on_action(|_: &Hide, cx: &mut App| cx.hide());
     cx.on_action(|_: &HideOthers, cx: &mut App| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx: &mut App| cx.unhide_other_apps());
@@ -137,11 +142,11 @@ pub fn handle_system_actions(cx: &mut App) {
     cx.on_action(|_: &ToggleFullScreen, cx: &mut App| {
         in_front(cx, |window| window.toggle_fullscreen())
     });
-    cx.on_action(|_: &About, cx: &mut App| {
-        if let Some(handle) = cx.active_window() {
-            let _ = handle.update(cx, |_, window, cx| crate::dialogs::about(window, cx));
-        }
-    });
+}
+
+/// Quits through the core, which writes what is pending first.
+pub fn quit(cx: &mut App) {
+    command(Command::Quit, cx);
 }
 
 /// Runs `act` on the window in front, if there is one. A command from the

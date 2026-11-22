@@ -12,23 +12,17 @@ name = "translocator"
 path = "src/main.rs"
 
 [dependencies]
+# The core (state and behaviour) and the runtime that carries out its effects.
+tl-app.workspace = true
+tl-runtime.workspace = true
+# Only for the askpass client mode in `main`.
 tl-core.workspace = true
-tl-local.workspace = true
-tl-ssh.workspace = true
-tl-s3.workspace = true
-tl-webdav.workspace = true
 
 chrono.workspace = true
-dirs.workspace = true
 env_logger.workspace = true
-futures = "0.3"
 # Only to decode the embedded window icon; gpui already pulls this in.
 image = { version = "0.25", default-features = false, features = ["png"] }
-libc.workspace = true
 log.workspace = true
-notify.workspace = true
-parking_lot.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 smol.workspace = true
 

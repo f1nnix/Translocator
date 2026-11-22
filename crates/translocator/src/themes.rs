@@ -21,8 +21,9 @@ use gpui_kit::component::{Theme, ThemeMode, ThemeRegistry};
 use gpui_kit::{App, Window};
 use serde_json::Value;
 
-use crate::app_state::AppState;
-use crate::settings::AppearanceMode;
+use tl_app::settings::AppearanceMode;
+
+use crate::app_state::Shell;
 
 /// The scheme a fresh installation starts in, and the name an unknown theme
 /// in the settings file falls back to. Both ship with the component library.
@@ -705,10 +706,12 @@ pub fn choices(dark: bool) -> Vec<(&'static str, &'static str)> {
 }
 
 /// Installs the themes the settings name and switches to the mode they ask
-/// for. `window` is read for the system appearance, which on Linux is only
+/// for. The settings are the core's, as last rendered; the shell calls this
+/// again whenever their appearance part changes (the title bar's sun/moon
+/// and the settings window change it through the core). `window` is read for the system appearance, which on Linux is only
 /// known per window.
 pub fn apply(window: Option<&Window>, cx: &mut App) {
-    let settings = cx.global::<AppState>().settings.appearance.clone();
+    let settings = cx.global::<Shell>().view.settings.appearance.clone();
     let mode = match settings.mode {
         AppearanceMode::Light => ThemeMode::Light,
         AppearanceMode::Dark => ThemeMode::Dark,
@@ -746,7 +749,7 @@ pub fn apply(window: Option<&Window>, cx: &mut App) {
 /// for forms. Switching theme reloads the theme file, which does not carry
 /// these, so they are re-applied after every change.
 pub fn tweaks(cx: &mut App) {
-    let general = cx.global::<AppState>().settings.general.clone();
+    let general = cx.global::<Shell>().view.settings.general.clone();
     Theme::update(cx, |theme| {
         theme.font_size = gpui_kit::px(general.font_size());
         theme.mono_font_size = gpui_kit::px(general.font_size() - 1.);
