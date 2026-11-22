@@ -1,0 +1,26 @@
+[package]
+name = "tl-runtime"
+description = "Translocator's effect runtime: carries out what the Crux core asks for (file systems, jobs, prompts, settings, watchers) on worker threads"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+tl-app.workspace = true
+tl-core.workspace = true
+tl-local.workspace = true
+tl-ssh.workspace = true
+tl-s3.workspace = true
+tl-webdav.workspace = true
+crux_core = "0.20"
+dirs.workspace = true
+libc.workspace = true
+log.workspace = true
+notify.workspace = true
+parking_lot.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tar.workspace = true
+tempfile.workspace = true
