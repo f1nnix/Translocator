@@ -1,5 +1,4 @@
 import AppKit
-import TLCore
 
 /// SF Symbols for what the core describes.
 extension IconKind {

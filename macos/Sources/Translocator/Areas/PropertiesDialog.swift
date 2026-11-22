@@ -1,5 +1,4 @@
 import SwiftUI
-import TLCore
 
 /// The properties dialog (`DialogKindSnapshot.properties`), after the GPUI
 /// shell's `crates/translocator/src/properties.rs`.

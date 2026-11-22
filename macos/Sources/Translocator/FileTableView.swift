@@ -1,5 +1,4 @@
 import AppKit
-import TLCore
 
 /// The table of a pane. It keeps nothing of its own: every key, click,
 /// drag and menu becomes core input, and what it draws comes back in the

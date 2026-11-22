@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import TLCore
 
 /// A viewer / editor window (F3, F4), one per `Snapshot.editors`: the GPUI
 /// shell's `crates/translocator/src/editor.rs`.

@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import TLCore
 
 /// One file pane: the location line, tabs, saved folders, the file list
 /// (with its column header) and the status line.

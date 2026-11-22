@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import TLCore
 
 /// The command line: the prompt, the field, and the console toggle.
 struct CommandLineBar: View {

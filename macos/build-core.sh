@@ -6,7 +6,8 @@
 # 1. the static library for arm64 and x86_64, joined with lipo;
 # 2. the Swift bindings, generated from that library by uniffi's own
 #    generator (crates/tl-ffi/src/bin/uniffi-bindgen-swift.rs), so they
-#    always match it: Sources/TLCore/TLCore.swift plus the C header and
+#    always match it: Sources/Translocator/Core/TLCore.swift plus the C
+#    header and
 #    module map of TLCoreFFI;
 # 3. build/TLCoreFFI.xcframework, the binary target Package.swift links.
 #
@@ -70,9 +71,11 @@ cargo run -q -p tl-ffi --target aarch64-apple-darwin --features cli --bin uniffi
   --module-name TLCoreFFI --modulemap-filename module.modulemap
 rm -rf "$meta"
 
-# The folder holds only this generated file, so a fresh checkout has none.
-mkdir -p macos/Sources/TLCore
-cp "$bindings/TLCore.swift" macos/Sources/TLCore/TLCore.swift
+# Compiled into the app's own target: Xcode 26's swift-build cannot link a
+# library target over a binary one (`library not found for -ltl_ffi`). The
+# folder holds only this generated file, so a fresh checkout has none.
+mkdir -p macos/Sources/Translocator/Core
+cp "$bindings/TLCore.swift" macos/Sources/Translocator/Core/TLCore.swift
 
 headers="$build/include"
 rm -rf "$headers"

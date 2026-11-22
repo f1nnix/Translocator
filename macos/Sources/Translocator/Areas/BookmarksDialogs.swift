@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import TLCore
 
 extension BookmarkField: Identifiable {
     public var id: String { key }

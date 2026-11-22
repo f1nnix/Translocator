@@ -1,5 +1,4 @@
 import SwiftUI
-import TLCore
 
 /// The synchronize-directories dialog (`DialogKindSnapshot.sync`), after
 /// the GPUI shell's `crates/translocator/src/sync.rs`.

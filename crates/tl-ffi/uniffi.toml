@@ -1,4 +1,4 @@
-# The Swift side: `TLCore.swift` (module TLCore) over the C module TLCoreFFI,
+# The Swift side: `TLCore.swift`, compiled into the app, over the C module TLCoreFFI,
 # which is what macos/build-core.sh packs into TLCoreFFI.xcframework.
 [bindings.swift]
 module_name = "TLCore"

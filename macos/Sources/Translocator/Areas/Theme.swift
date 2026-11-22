@@ -1,7 +1,6 @@
 import AppKit
 import Observation
 import SwiftUI
-import TLCore
 
 /// The colour scheme of the content layer.
 ///
@@ -66,7 +65,7 @@ final class Theme {
     private func update() {
         let dark = Theme.effectiveDark()
         if dark != isDark { isDark = dark }
-        let next = TLCore.palette(name: dark ? names.dark : names.light)
+        let next = Translocator.palette(name: dark ? names.dark : names.light)
         // A light scheme in a dark window (or the other way round) would
         // fight the chrome around it: the pickers only offer matching ones,
         // and a hand-edited file falls back to the system colours.

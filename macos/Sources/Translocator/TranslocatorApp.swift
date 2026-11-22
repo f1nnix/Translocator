@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import TLCore
 
 struct TranslocatorApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate

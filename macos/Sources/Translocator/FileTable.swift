@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import TLCore
 
 /// The drag payload between panes: what `PaneInput.drop` needs.
 struct DragPayload: Codable {

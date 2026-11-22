@@ -1,11 +1,10 @@
 import AppKit
 import SwiftUI
-import TLCore
 
 /// The text view of the viewer, the editor and quick look: an `NSTextView`
 /// (TextKit 1, for the line-number ruler) in a monospaced font, with no
 /// wrapping, the find bar (⌘F, ⌘G, ⇧⌘G, ⌘E, ⌥⌘F), undo, and syntax colours
-/// from the core's highlighter (`TLCore.highlight`).
+/// from the core's highlighter (`highlight` in Core/TLCore.swift).
 ///
 /// The text is loaded whenever `revision` changes (the editor's
 /// `content_version`, quick look's `revision`) and nothing else replaces

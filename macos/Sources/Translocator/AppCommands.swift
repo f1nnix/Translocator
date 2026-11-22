@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import TLCore
 
 /// The menu bar: every command of the key table, in the GPUI shell's
 /// menus, each with the user's current shortcut. Commands of the file list

@@ -1,7 +1,6 @@
 import AppKit
 import Observation
 import SwiftUI
-import TLCore
 
 /// A transient banner in the main window.
 struct Toast: Identifiable, Equatable {

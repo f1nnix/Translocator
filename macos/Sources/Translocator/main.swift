@@ -6,7 +6,6 @@
 // UI exists.
 
 import Foundation
-import TLCore
 
 if ProcessInfo.processInfo.environment[askpassSocketEnv()] != nil {
     let prompt = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : ""

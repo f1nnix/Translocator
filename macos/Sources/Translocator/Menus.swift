@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import TLCore
 
 /// An AppKit menu item that runs a closure.
 @MainActor

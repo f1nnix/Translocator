@@ -1,5 +1,4 @@
 import SwiftUI
-import TLCore
 
 /// The multi-rename dialog (`DialogKindSnapshot.rename`), after the GPUI
 /// shell's `crates/translocator/src/rename.rs`.

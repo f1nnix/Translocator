@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import TLCore
 
 /// The shared key table, indexed for the menus and the file list's keys.
 ///

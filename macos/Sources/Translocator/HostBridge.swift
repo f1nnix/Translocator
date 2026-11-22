@@ -1,6 +1,5 @@
 import AppKit
 import Synchronization
-import TLCore
 
 /// What the core asks of the app, carried to the main thread.
 enum HostEvent: Sendable {
@@ -15,7 +14,7 @@ enum HostEvent: Sendable {
 /// The core's `Host`. Every call comes on a Rust thread: it hops to the
 /// main actor and returns at once. Bursts of `changed()` collapse into one
 /// snapshot refresh per run-loop turn.
-final class HostBridge: TLCore.Host {
+final class HostBridge: Translocator.Host {
     private let pending = Mutex(false)
     @MainActor weak var store: AppStore?
 

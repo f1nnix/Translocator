@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import TLCore
 
 /// The main window: two panes, the console and command line, the jobs
 /// strip and the function bar, with the toolbar, dialogs and toasts.

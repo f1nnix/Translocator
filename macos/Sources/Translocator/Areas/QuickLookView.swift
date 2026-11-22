@@ -1,7 +1,6 @@
 import AppKit
 import ImageIO
 import SwiftUI
-import TLCore
 
 /// Quick look (⌘Y), drawn in place of the pane opposite the active one
 /// while `Snapshot.quick_look` is set: the GPUI shell's

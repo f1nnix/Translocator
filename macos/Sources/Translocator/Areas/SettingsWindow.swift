@@ -1,6 +1,5 @@
 import AppKit
 import SwiftUI
-import TLCore
 
 /// The settings window (⌘, through the core's `OpenSettings`), as the
 /// GPUI shell's `crates/translocator/src/settings_window.rs`: General, Keys
@@ -549,7 +548,7 @@ private struct ThemesPane: View {
                     Text("· in use").font(.callout).foregroundStyle(.secondary)
                 }
             }
-            ThemePreview(colors: TLCore.palette(name: name).map(ContentColors.init) ?? .system, general: general)
+            ThemePreview(colors: Translocator.palette(name: name).map(ContentColors.init) ?? .system, general: general)
                 .environment(\.colorScheme, scheme)
         }
         .frame(maxWidth: .infinity)
