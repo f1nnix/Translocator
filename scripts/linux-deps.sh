@@ -16,19 +16,26 @@ mode=${1:-build}
 # runtime, so only the runtime packages matter for those.
 # zip and unzip are not needed by the app, but the archive tests use them to
 # exercise the zip paths; without them those tests quietly skip.
+# GTK 4 and libadwaita are the GTK app's (crates/translocator-gtk): GTK 4.14
+# and libadwaita 1.5 or later, which Ubuntu 24.04 (GNOME 46) has. The SVG
+# loader draws the symbolic icons; it is only a recommendation of GTK's.
 apt_build="build-essential pkg-config curl ca-certificates git zip unzip
     libfontconfig-dev libfreetype-dev libwayland-dev libxkbcommon-dev
-    libxkbcommon-x11-dev libx11-dev libxcb1-dev libdbus-1-dev"
+    libxkbcommon-x11-dev libx11-dev libxcb1-dev libdbus-1-dev
+    libgtk-4-dev libadwaita-1-dev"
 apt_runtime="libfontconfig1 libfreetype6 libwayland-client0 libwayland-cursor0
     libwayland-egl1 libxkbcommon0 libxkbcommon-x11-0 libx11-6 libxcb1
-    libdbus-1-3 libvulkan1 mesa-vulkan-drivers openssh-client xdg-utils fonts-dejavu-core"
+    libdbus-1-3 libvulkan1 mesa-vulkan-drivers openssh-client xdg-utils fonts-dejavu-core
+    libgtk-4-1 libadwaita-1-0 librsvg2-common"
 
 dnf_build="gcc gcc-c++ make pkgconf-pkg-config curl ca-certificates git zip unzip
     fontconfig-devel freetype-devel wayland-devel libxkbcommon-devel
-    libxkbcommon-x11-devel libX11-devel libxcb-devel dbus-devel"
+    libxkbcommon-x11-devel libX11-devel libxcb-devel dbus-devel
+    gtk4-devel libadwaita-devel"
 dnf_runtime="fontconfig freetype libwayland-client libwayland-cursor
     libwayland-egl libxkbcommon libxkbcommon-x11 libX11 libxcb dbus-libs
-    vulkan-loader mesa-vulkan-drivers openssh-clients xdg-utils dejavu-sans-fonts"
+    vulkan-loader mesa-vulkan-drivers openssh-clients xdg-utils dejavu-sans-fonts
+    gtk4 libadwaita"
 
 if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive

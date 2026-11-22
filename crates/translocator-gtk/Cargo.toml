@@ -1,0 +1,30 @@
+[package]
+name = "translocator-gtk"
+description = "Translocator's GTK 4 and libadwaita shell for Linux, on the shared Crux core (through tl-ffi)"
+repository = "https://github.com/f1nnix/Translocator"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "translocator-gtk"
+path = "src/main.rs"
+
+[dependencies]
+# The presentation layer the macOS app uses too: the core, its runtime,
+# display-ready snapshots and rows, the key table and the colour schemes.
+tl-ffi = { path = "../tl-ffi" }
+# Only for the key rules of this platform (`tl_app::keys::Platform::Linux`):
+# how a shared binding is pressed, written and checked for clashes here.
+tl-app.workspace = true
+log.workspace = true
+
+# GTK is only there on Linux (and the BSDs): on macOS the crate builds to a
+# stub, so `cargo test --workspace` keeps working on a Mac.
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+# GTK 4.14 and libadwaita 1.5: GNOME 46, Ubuntu 24.04.
+gtk = { package = "gtk4", version = "0.11", features = ["gnome_46"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
+async-channel = "2"
+serde_json.workspace = true
