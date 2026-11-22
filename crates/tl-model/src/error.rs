@@ -3,7 +3,7 @@ use std::io;
 /// Errors every provider maps its failures into, so the UI can react the
 /// same way regardless of where a file lives (e.g. offer sudo on
 /// `PermissionDenied`).
-#[derive(Debug, Clone, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error, serde::Serialize, serde::Deserialize)]
 pub enum VfsError {
     #[error("Permission denied: {0}")]
     PermissionDenied(String),
@@ -37,7 +37,8 @@ impl VfsError {
             io::ErrorKind::PermissionDenied => VfsError::PermissionDenied(msg),
             io::ErrorKind::NotFound => VfsError::NotFound(msg),
             io::ErrorKind::AlreadyExists => VfsError::AlreadyExists(msg),
-            _ if err.raw_os_error() == Some(libc::EPERM) => VfsError::PermissionDenied(msg),
+            // EPERM is 1 on every Unix.
+            _ if cfg!(unix) && err.raw_os_error() == Some(1) => VfsError::PermissionDenied(msg),
             _ => VfsError::Other(msg),
         }
     }

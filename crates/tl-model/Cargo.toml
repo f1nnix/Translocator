@@ -1,0 +1,21 @@
+[package]
+name = "tl-model"
+description = "Translocator's shared, side-effect-free model: paths, entries, errors, and the pure halves of compare, sync, multi-rename, transfers, archives and bookmarks"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+# Random ids for new bookmarks and places. Only the I/O side enables it: the
+# Crux core makes its ids from a seed the shell hands it.
+uuid = ["dep:uuid"]
+
+[dependencies]
+regex.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+uuid = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true

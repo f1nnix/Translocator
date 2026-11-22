@@ -1,5 +1,5 @@
 /// File type as reported by `lstat`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum EntryKind {
     File,
     Dir,
@@ -58,7 +58,7 @@ impl EntryKind {
 }
 
 /// One directory entry as shown in a pane.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct Entry {
     /// Raw name bytes (not necessarily UTF-8).
     pub name: Vec<u8>,

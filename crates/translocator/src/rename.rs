@@ -154,7 +154,7 @@ impl RenameView {
             .map(|e| RenameSource {
                 name: &e.name,
                 is_dir: e.is_dir(),
-                mtime: e.mtime,
+                time: e.mtime.and_then(tl_core::multirename::local_time),
             })
             .collect();
         let parent = self.sel.dir.file_name_lossy();

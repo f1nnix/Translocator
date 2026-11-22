@@ -3,23 +3,23 @@
 //! connections, and the transfer engine that moves data between providers —
 //! plus what is built on them: directory compare and sync, multi-rename and
 //! archives shown as folders.
+//!
+//! The plain data and pure logic underneath (paths, entries, errors and the
+//! planning halves of compare, sync, multi-rename) live in `tl_model`, which
+//! the Crux core shares; this crate re-exports it under the old paths.
 
 pub mod archive;
+pub use tl_model::{compare, entry, error, path, util};
 pub mod askpass;
 pub mod bookmark;
 pub mod cancel;
-pub mod compare;
-pub mod entry;
-pub mod error;
 pub mod multirename;
-pub mod path;
 pub mod plugin;
 pub mod progress;
 pub mod prompt;
 pub mod shell;
 pub mod sync;
 pub mod transfer;
-pub mod util;
 pub mod vfs;
 
 pub use archive::{ArchiveBackend, ArchiveFormat, ArchiveMember};

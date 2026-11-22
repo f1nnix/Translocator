@@ -17,6 +17,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::sync::Arc;
 
+pub use tl_model::transfer::*;
+
 use crate::cancel::CancelToken;
 use crate::entry::{Entry, EntryKind};
 use crate::error::{VfsError, VfsResult};
@@ -32,11 +34,6 @@ use crate::vfs::{
 /// uploaded through sudo).
 const IN_PLACE_OVERWRITE_LIMIT: u64 = 16 * 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TransferMode {
-    Copy,
-    Move,
-}
 
 pub struct TransferSpec {
     pub mode: TransferMode,
@@ -57,49 +54,6 @@ impl TransferSpec {
     }
 }
 
-/// An item about to land on something that already exists.
-#[derive(Clone, Debug)]
-pub struct Conflict {
-    pub source: Entry,
-    pub existing: Entry,
-    pub dst_dir: VPath,
-    /// Both sides are real directories, so the overwrite choices merge.
-    pub both_dirs: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ConflictChoice {
-    /// File: replace it. Folder: merge, overwriting files inside.
-    Overwrite,
-    /// File: replace it if the source is newer. Folder: merge, overwriting
-    /// only older files.
-    OverwriteOlder,
-    /// Folder: merge, keeping existing files. File: same as `Skip`.
-    SkipExisting,
-    Skip,
-    /// Transfer under a new, unused name.
-    KeepBoth,
-    Cancel,
-}
-
-#[derive(Clone, Debug)]
-pub struct ConflictAnswer {
-    pub choice: ConflictChoice,
-    pub apply_to_all: bool,
-    /// Explicit name for `KeepBoth`; generated when `None`.
-    pub rename_to: Option<Vec<u8>>,
-}
-
-impl ConflictAnswer {
-    pub fn new(choice: ConflictChoice) -> Self {
-        ConflictAnswer {
-            choice,
-            apply_to_all: false,
-            rename_to: None,
-        }
-    }
-}
-
 /// Asks the user how to resolve a conflict. Called on the worker thread;
 /// implementations block until the user answers.
 pub trait ConflictResolver: Send + Sync {
@@ -113,15 +67,6 @@ impl ConflictResolver for FixedResolver {
     fn resolve(&self, _conflict: &Conflict) -> ConflictAnswer {
         ConflictAnswer::new(self.0)
     }
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct TransferReport {
-    pub transferred: usize,
-    pub skipped: usize,
-    pub server_side: bool,
-    /// Final names of transferred items (to select them afterwards).
-    pub names: Vec<Vec<u8>>,
 }
 
 /// A resolved item plus the bits the streaming path needs.

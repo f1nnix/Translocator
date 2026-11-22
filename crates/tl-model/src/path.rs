@@ -11,6 +11,12 @@ use std::fmt;
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct VPath(Vec<u8>);
 
+impl Default for VPath {
+    fn default() -> Self {
+        VPath::root()
+    }
+}
+
 impl VPath {
     pub fn root() -> Self {
         VPath(b"/".to_vec())
@@ -157,6 +163,47 @@ impl fmt::Display for VPath {
 impl fmt::Debug for VPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "VPath({:?})", String::from_utf8_lossy(&self.0))
+    }
+}
+
+/// A path is bytes, because a remote name need not be UTF-8. One that is
+/// valid UTF-8 is written as a plain string, so a file stays readable by
+/// hand; anything else becomes a list of byte values, because writing it
+/// lossily would leave it pointing somewhere else.
+impl serde::Serialize for VPath {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match std::str::from_utf8(&self.0) {
+            Ok(text) => s.serialize_str(text),
+            Err(_) => s.collect_seq(self.0.iter()),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for VPath {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<VPath, D::Error> {
+        use serde::de::{self, SeqAccess, Visitor};
+
+        struct Raw;
+        impl<'de> Visitor<'de> for Raw {
+            type Value = VPath;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                f.write_str("a path, as a string or a list of byte values")
+            }
+
+            fn visit_str<E: de::Error>(self, text: &str) -> Result<VPath, E> {
+                Ok(VPath::parse(text))
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<VPath, A::Error> {
+                let mut raw = Vec::new();
+                while let Some(byte) = seq.next_element::<u8>()? {
+                    raw.push(byte);
+                }
+                Ok(VPath::new(raw))
+            }
+        }
+        d.deserialize_any(Raw)
     }
 }
 

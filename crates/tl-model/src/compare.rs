@@ -11,7 +11,7 @@ use crate::util::name_key;
 pub const MTIME_TOLERANCE: i64 = 2;
 
 /// How an item relates to its namesake on the other side.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Diff {
     /// Nothing with this name on the other side.
     Unique,
@@ -35,7 +35,7 @@ pub fn diff_files(a_size: u64, a_mtime: Option<i64>, b_size: u64, b_mtime: Optio
     if a_size == b_size { Diff::Same } else { Diff::Different }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CompareStats {
     pub only_left: usize,
     pub only_right: usize,
@@ -53,7 +53,7 @@ impl CompareStats {
 }
 
 /// Which names to mark on each side.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct CompareResult {
     pub left: Vec<Vec<u8>>,
     pub right: Vec<Vec<u8>>,

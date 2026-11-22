@@ -1,135 +1,19 @@
-use std::collections::BTreeMap;
+//! Bookmarks and places persisted as JSON in the application support
+//! directory. The data and its edits are [`tl_model::bookmark`]; this is
+//! the file they live in.
+
 use std::io;
 use std::path::{Path, PathBuf};
 
-use serde::{Deserialize, Serialize};
+pub use tl_model::bookmark::*;
 
 use crate::VPath;
-
-/// Plugin-defined settings of a bookmark. Values are strings; toggles are
-/// stored as `"true"`/`"false"`.
-pub type BookmarkConfig = BTreeMap<String, String>;
-
-/// A saved location: which plugin to use and how to configure it.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Bookmark {
-    pub id: String,
-    pub name: String,
-    /// Id of the provider plugin, e.g. `"ssh"`.
-    pub plugin: String,
-    #[serde(default)]
-    pub config: BookmarkConfig,
-}
-
-impl Bookmark {
-    pub fn new(name: impl Into<String>, plugin: impl Into<String>) -> Self {
-        Bookmark {
-            id: uuid::Uuid::new_v4().to_string(),
-            name: name.into(),
-            plugin: plugin.into(),
-            config: BookmarkConfig::new(),
-        }
-    }
-
-    /// A config value, trimmed; empty string when unset.
-    pub fn get(&self, key: &str) -> &str {
-        self.config.get(key).map(|s| s.trim()).unwrap_or("")
-    }
-
-    pub fn flag(&self, key: &str) -> bool {
-        matches!(self.get(key), "true" | "1" | "yes")
-    }
-
-    pub fn set(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        self.config.insert(key.into(), value.into());
-    }
-}
-
-/// A folder saved inside one connection: what the quick-switch row under a
-/// pane's location line is made of.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Place {
-    pub id: String,
-    /// Which connection it belongs to: the provider's
-    /// [`location_key`](crate::Vfs::location_key), so two bookmarks opening
-    /// the same host share its places, and one host's row never shows
-    /// another's folders.
-    pub host: String,
-    pub name: String,
-    /// Absolute path on that host.
-    #[serde(with = "raw_path")]
-    pub path: VPath,
-}
-
-impl Place {
-    pub fn new(host: impl Into<String>, name: impl Into<String>, path: VPath) -> Self {
-        Place {
-            id: uuid::Uuid::new_v4().to_string(),
-            host: host.into(),
-            name: name.into(),
-            path,
-        }
-    }
-}
-
-/// A path is bytes, because a remote name need not be UTF-8. One that is
-/// valid UTF-8 is written as a plain string, so the file stays readable by
-/// hand; anything else becomes a list of byte values, because writing it
-/// lossily would leave a place pointing somewhere else.
-mod raw_path {
-    use std::fmt;
-
-    use serde::de::{self, SeqAccess, Visitor};
-    use serde::{Deserializer, Serializer};
-
-    use crate::VPath;
-
-    pub fn serialize<S: Serializer>(path: &VPath, s: S) -> Result<S::Ok, S::Error> {
-        match std::str::from_utf8(path.as_bytes()) {
-            Ok(text) => s.serialize_str(text),
-            Err(_) => s.collect_seq(path.as_bytes().iter()),
-        }
-    }
-
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<VPath, D::Error> {
-        struct Raw;
-        impl<'de> Visitor<'de> for Raw {
-            type Value = VPath;
-
-            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
-                f.write_str("a path, as a string or a list of byte values")
-            }
-
-            fn visit_str<E: de::Error>(self, text: &str) -> Result<VPath, E> {
-                Ok(VPath::parse(text))
-            }
-
-            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<VPath, A::Error> {
-                let mut raw = Vec::new();
-                while let Some(byte) = seq.next_element::<u8>()? {
-                    raw.push(byte);
-                }
-                Ok(VPath::new(raw))
-            }
-        }
-        d.deserialize_any(Raw)
-    }
-}
-
-#[derive(Default, Serialize, Deserialize)]
-struct StoreFile {
-    #[serde(default)]
-    bookmarks: Vec<Bookmark>,
-    #[serde(default)]
-    places: Vec<Place>,
-}
 
 /// Bookmarks and places persisted as JSON in the application support
 /// directory.
 pub struct BookmarkStore {
     path: PathBuf,
-    bookmarks: Vec<Bookmark>,
-    places: Vec<Place>,
+    data: Bookmarks,
 }
 
 impl BookmarkStore {
@@ -140,146 +24,126 @@ impl BookmarkStore {
 
     pub fn load(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
-        let (bookmarks, places) = match std::fs::read(&path) {
-            Ok(bytes) => match serde_json::from_slice::<StoreFile>(&bytes) {
-                Ok(file) => (file.bookmarks, file.places),
-                Err(err) => {
-                    log::error!("cannot parse {}: {err}", path.display());
-                    // Keep the unreadable file around instead of overwriting it.
-                    let _ = std::fs::copy(&path, path.with_extension("json.broken"));
-                    Default::default()
-                }
-            },
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Default::default(),
-            Err(err) => {
-                log::error!("cannot read {}: {err}", path.display());
-                Default::default()
-            }
-        };
-        BookmarkStore {
-            path,
-            bookmarks,
-            places,
-        }
+        let data = read(&path);
+        BookmarkStore { path, data }
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    /// Everything in the file.
+    pub fn data(&self) -> &Bookmarks {
+        &self.data
+    }
+
     pub fn all(&self) -> &[Bookmark] {
-        &self.bookmarks
+        self.data.all()
     }
 
     pub fn get(&self, id: &str) -> Option<&Bookmark> {
-        self.bookmarks.iter().find(|b| b.id == id)
+        self.data.get(id)
     }
 
     /// Inserts or replaces (by id) and saves.
     pub fn upsert(&mut self, bookmark: Bookmark) -> io::Result<()> {
-        match self.bookmarks.iter_mut().find(|b| b.id == bookmark.id) {
-            Some(existing) => *existing = bookmark,
-            None => self.bookmarks.push(bookmark),
-        }
+        self.data.upsert(bookmark);
         self.save()
     }
 
     pub fn remove(&mut self, id: &str) -> io::Result<()> {
-        self.bookmarks.retain(|b| b.id != id);
+        self.data.remove(id);
         self.save()
     }
 
     /// Moves a bookmark one position up or down.
     pub fn reorder(&mut self, id: &str, delta: isize) -> io::Result<()> {
-        if let Some(idx) = self.bookmarks.iter().position(|b| b.id == id) {
-            let target = idx as isize + delta;
-            if target >= 0 && (target as usize) < self.bookmarks.len() {
-                self.bookmarks.swap(idx, target as usize);
-                return self.save();
-            }
-        }
-        Ok(())
-    }
-
-    // ----- places ---------------------------------------------------------
-
-    /// One host's places, in the order the user put them.
-    pub fn places(&self, host: &str) -> Vec<Place> {
-        self.places.iter().filter(|p| p.host == host).cloned().collect()
-    }
-
-    /// The n-th place of a host, which is what ⌘1…⌘9 jump to.
-    pub fn place_at(&self, host: &str, index: usize) -> Option<&Place> {
-        self.places.iter().filter(|p| p.host == host).nth(index)
-    }
-
-    /// The place for exactly this folder, if the folder is one.
-    pub fn place_of(&self, host: &str, path: &VPath) -> Option<&Place> {
-        self.places.iter().find(|p| p.host == host && &p.path == path)
-    }
-
-    pub fn add_place(&mut self, place: Place) -> io::Result<()> {
-        self.places.push(place);
-        self.save()
-    }
-
-    pub fn remove_place(&mut self, id: &str) -> io::Result<()> {
-        self.places.retain(|p| p.id != id);
-        self.save()
-    }
-
-    pub fn rename_place(&mut self, id: &str, name: impl Into<String>) -> io::Result<()> {
-        if let Some(place) = self.places.iter_mut().find(|p| p.id == id) {
-            place.name = name.into();
+        if self.data.reorder(id, delta) {
             return self.save();
         }
         Ok(())
     }
 
-    /// Moves a place one position along its own host's row, stepping over
-    /// the places of other hosts in between.
-    pub fn move_place(&mut self, id: &str, delta: isize) -> io::Result<()> {
-        let Some(place) = self.places.iter().find(|p| p.id == id) else {
-            return Ok(());
-        };
-        let host = place.host.clone();
-        let mine: Vec<usize> = self
-            .places
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.host == host)
-            .map(|(i, _)| i)
-            .collect();
-        let Some(at) = mine.iter().position(|i| self.places[*i].id == id) else {
-            return Ok(());
-        };
-        let target = at as isize + delta;
-        if target < 0 || target as usize >= mine.len() {
-            return Ok(());
-        }
-        self.places.swap(mine[at], mine[target as usize]);
+    /// One host's places, in the order the user put them.
+    pub fn places(&self, host: &str) -> Vec<Place> {
+        self.data.places(host)
+    }
+
+    /// The n-th place of a host, which is what ⌘1…⌘9 jump to.
+    pub fn place_at(&self, host: &str, index: usize) -> Option<&Place> {
+        self.data.place_at(host, index)
+    }
+
+    /// The place for exactly this folder, if the folder is one.
+    pub fn place_of(&self, host: &str, path: &VPath) -> Option<&Place> {
+        self.data.place_of(host, path)
+    }
+
+    pub fn add_place(&mut self, place: Place) -> io::Result<()> {
+        self.data.add_place(place);
         self.save()
     }
 
-    /// Atomic write (temp file + rename), readable only by the user.
-    pub fn save(&self) -> io::Result<()> {
-        if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let file = StoreFile {
-            bookmarks: self.bookmarks.clone(),
-            places: self.places.clone(),
-        };
-        let json = serde_json::to_vec_pretty(&file).map_err(io::Error::other)?;
-        let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
-        }
-        std::fs::rename(&tmp, &self.path)
+    pub fn remove_place(&mut self, id: &str) -> io::Result<()> {
+        self.data.remove_place(id);
+        self.save()
     }
+
+    pub fn rename_place(&mut self, id: &str, name: impl Into<String>) -> io::Result<()> {
+        if self.data.rename_place(id, name) {
+            return self.save();
+        }
+        Ok(())
+    }
+
+    /// Moves a place one position along its own host's row.
+    pub fn move_place(&mut self, id: &str, delta: isize) -> io::Result<()> {
+        if self.data.move_place(id, delta) {
+            return self.save();
+        }
+        Ok(())
+    }
+
+    pub fn save(&self) -> io::Result<()> {
+        write(&self.path, &self.data)
+    }
+}
+
+/// Reads a bookmarks file. A missing file is an empty one; a file that
+/// cannot be parsed is copied aside rather than overwritten later, so a
+/// hand edit with a comma too few can be repaired.
+pub fn read(path: &Path) -> Bookmarks {
+    match std::fs::read(path) {
+        Ok(bytes) => match serde_json::from_slice::<Bookmarks>(&bytes) {
+            Ok(file) => file,
+            Err(err) => {
+                log::error!("cannot parse {}: {err}", path.display());
+                let _ = std::fs::copy(path, path.with_extension("json.broken"));
+                Bookmarks::default()
+            }
+        },
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Bookmarks::default(),
+        Err(err) => {
+            log::error!("cannot read {}: {err}", path.display());
+            Bookmarks::default()
+        }
+    }
+}
+
+/// Atomic write (temp file + rename), readable only by the user.
+pub fn write(path: &Path, data: &Bookmarks) -> io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let json = serde_json::to_vec_pretty(data).map_err(io::Error::other)?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&tmp, path)
 }
 
 /// Per-user data directory of the app.

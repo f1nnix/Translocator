@@ -9,6 +9,9 @@ license = "MIT"
 
 [workspace.dependencies]
 tl-core = { path = "crates/tl-core" }
+tl-model = { path = "crates/tl-model" }
+tl-app = { path = "crates/tl-app" }
+tl-runtime = { path = "crates/tl-runtime" }
 tl-local = { path = "crates/tl-local" }
 tl-ssh = { path = "crates/tl-ssh" }
 tl-s3 = { path = "crates/tl-s3" }

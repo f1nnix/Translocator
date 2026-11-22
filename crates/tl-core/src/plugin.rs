@@ -169,3 +169,39 @@ impl PluginRegistry {
         &self.plugins
     }
 }
+
+impl FieldSpec {
+    /// The field as the UI sees it: owned data that can cross into the core.
+    pub fn info(&self) -> tl_model::FieldInfo {
+        let kind = match &self.kind {
+            FieldKind::Text => tl_model::FieldKind::Text,
+            FieldKind::Number => tl_model::FieldKind::Number,
+            FieldKind::Toggle => tl_model::FieldKind::Toggle,
+            FieldKind::LocalPath => tl_model::FieldKind::LocalPath,
+            FieldKind::Secret => tl_model::FieldKind::Secret,
+            FieldKind::Choice(options) => tl_model::FieldKind::Choice(
+                options.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect(),
+            ),
+        };
+        tl_model::FieldInfo {
+            key: self.key.into(),
+            label: self.label.into(),
+            kind,
+            placeholder: self.placeholder.into(),
+            help: self.help.into(),
+            required: self.required,
+            default: self.default.into(),
+            advanced: self.advanced,
+        }
+    }
+}
+
+/// A plugin as the UI sees it.
+pub fn plugin_info(plugin: &dyn ProviderPlugin) -> tl_model::PluginInfo {
+    tl_model::PluginInfo {
+        id: plugin.id().into(),
+        name: plugin.name().into(),
+        description: plugin.description().into(),
+        fields: plugin.fields().iter().map(FieldSpec::info).collect(),
+    }
+}
