@@ -620,6 +620,12 @@ fn listed(model: &mut Model, id: TabId, generation: u64, result: FsOutput, out: 
     let FsOutput::Listing { entries, space } = result else { return };
     tab.space = space;
     match entries {
+        Ok(entries) if tab.pending_select.is_none() && tab.error.is_none() && *tab.listing.entries == entries => {
+            // The same again (a watcher reporting a change that left the
+            // folder as it was): keep the listing, its order and the cursor,
+            // so nothing downstream sees new rows.
+            watch(model, side, ix, out);
+        }
         Ok(entries) => {
             // This listing supersedes any earlier one, so it owes the cursor
             // to whoever asked last; failing that, the cursor stays on the

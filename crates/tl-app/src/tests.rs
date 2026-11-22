@@ -2,6 +2,7 @@
 //! effects: no files, no threads, no window.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 use crux_core::Core;
 use tl_model::{Bookmarks, Capabilities, Entry, EntryKind, VPath};
@@ -312,6 +313,22 @@ fn the_cursor_stays_on_its_file_when_others_appear() {
     listing.insert(0, file("aa.log", 1));
     listing.insert(0, file("ab.log", 1));
     shell.cmd(C::Refresh);
+    assert_eq!(shell.cursor_name(Side::Left), "db.log");
+}
+
+#[test]
+fn listing_the_same_folder_again_keeps_its_rows() {
+    let mut shell = Shell::new(&logs());
+    shell.send(Event::Pane(Side::Left, pane::PaneInput::Click { row: 4, toggle: false, range: false }));
+    let before = shell.view().panes[0].order.clone();
+    shell.cmd(C::Refresh);
+    let after = shell.view().panes[0].order.clone();
+    assert!(Arc::ptr_eq(&before, &after), "an unchanged folder keeps its order");
+    assert_eq!(shell.cursor_name(Side::Left), "db.log");
+    // A change does replace it.
+    shell.files.get_mut("/left").unwrap().push(file("zz.log", 1));
+    shell.cmd(C::Refresh);
+    assert!(!Arc::ptr_eq(&after, &shell.view().panes[0].order));
     assert_eq!(shell.cursor_name(Side::Left), "db.log");
 }
 
