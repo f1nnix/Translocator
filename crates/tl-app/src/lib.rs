@@ -18,6 +18,7 @@ pub mod dialog;
 pub mod editor;
 pub mod ids;
 pub mod jobs;
+pub mod keys;
 pub mod model;
 pub mod ops;
 pub mod pane;
