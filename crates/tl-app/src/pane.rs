@@ -621,11 +621,16 @@ fn listed(model: &mut Model, id: TabId, generation: u64, result: FsOutput, out: 
     tab.space = space;
     match entries {
         Ok(entries) => {
+            // This listing supersedes any earlier one, so it owes the cursor
+            // to whoever asked last; failing that, the cursor stays on the
+            // entry it is on. Both are names from the listing being
+            // replaced, so take them before it goes.
+            let select = tab
+                .pending_select
+                .take()
+                .or_else(|| tab.cursor_entry().map(|e| e.name.clone()));
             tab.listing = Listing::new(entries);
             tab.error = None;
-            // This listing supersedes any earlier one, so it owes the cursor
-            // to whoever asked last.
-            let select = tab.pending_select.take();
             rebuild(tab, select.as_deref(), show_hidden, folders_first);
             watch(model, side, ix, out);
         }

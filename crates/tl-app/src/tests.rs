@@ -303,6 +303,19 @@ fn a_folder_that_changes_mid_listing_still_lands_the_cursor() {
 }
 
 #[test]
+fn the_cursor_stays_on_its_file_when_others_appear() {
+    let mut shell = Shell::new(&logs());
+    shell.send(Event::Pane(Side::Left, pane::PaneInput::Click { row: 4, toggle: false, range: false }));
+    assert_eq!(shell.cursor_name(Side::Left), "db.log");
+    // Two files appear before it in the order, and the folder is listed again.
+    let listing = shell.files.get_mut("/left").unwrap();
+    listing.insert(0, file("aa.log", 1));
+    listing.insert(0, file("ab.log", 1));
+    shell.cmd(C::Refresh);
+    assert_eq!(shell.cursor_name(Side::Left), "db.log");
+}
+
+#[test]
 fn folders_can_be_sorted_in_with_the_files() {
     let mut shell = Shell::new(&logs());
     assert_eq!(shell.names(Side::Left)[1], "logs");
