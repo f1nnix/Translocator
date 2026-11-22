@@ -13,6 +13,10 @@ use tl_app::keys::{self as core, Context, Keystroke, Platform};
 
 use crate::input::Command;
 
+/// How this build's platform writes keys: symbols on macOS, `Ctrl+` on
+/// Linux (where `cmd` in a binding means Ctrl).
+pub(crate) const PLATFORM: Platform = if cfg!(target_os = "macos") { Platform::Mac } else { Platform::Linux };
+
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KeyContext {
     /// The file list of a pane.
@@ -143,7 +147,7 @@ pub fn binding(keys: &str) -> KeyBinding {
     KeyBinding {
         keys: keys.to_string(),
         canonical,
-        pretty: core::pretty(keys, Platform::Mac),
+        pretty: core::pretty(keys, PLATFORM),
         strokes: strokes.into_iter().map(Into::into).collect(),
     }
 }
@@ -196,10 +200,10 @@ pub fn validate_keys(keys: String) -> Option<String> {
     core::validate(&keys).err()
 }
 
-/// `⇧⌘G` for `cmd-shift-g`; text that does not parse comes back as it is.
+/// `⇧⌘G` for `cmd-shift-g` on macOS, `Ctrl+Shift+G` on Linux; text that does not parse comes back as it is.
 #[uniffi::export]
 pub fn pretty_keys(keys: String) -> String {
-    core::pretty(&keys, Platform::Mac)
+    core::pretty(&keys, PLATFORM)
 }
 
 /// The settings file's spelling of a keystroke (for recording keys).
@@ -220,7 +224,8 @@ mod tests {
         let copy = table.iter().find(|c| c.id == "copy-files").unwrap();
         assert!(copy.changed);
         assert_eq!(copy.bindings[0].canonical, "shift-cmd-f5");
-        assert_eq!(copy.bindings[0].pretty, "⇧⌘F5");
+        let pretty = if cfg!(target_os = "macos") { "⇧⌘F5" } else { "Ctrl+Shift+F5" };
+        assert_eq!(copy.bindings[0].pretty, pretty);
         assert_eq!(
             copy.target,
             KeyTarget::Command {

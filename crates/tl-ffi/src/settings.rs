@@ -208,7 +208,12 @@ pub fn settings_ranges() -> SettingsRanges {
 /// The help under the terminal field, on macOS.
 #[uniffi::export]
 pub fn terminal_help() -> String {
-    "A command to run instead of Terminal.app, for example `open -a iTerm`. Empty uses Terminal.app.".to_string()
+    if cfg!(target_os = "macos") {
+        "A command to run instead of Terminal.app, for example `open -a iTerm`. Empty uses Terminal.app."
+    } else {
+        "A command to run instead of the desktop's terminal, for example `kitty`. Empty uses $TERMINAL and then whatever is installed."
+    }
+    .to_string()
 }
 
 #[cfg(test)]

@@ -77,7 +77,7 @@ pub struct EditorNotification {
     pub seq: u64,
 }
 
-pub(crate) fn snapshot(view: &editor::EditorView) -> EditorSnapshot {
+pub(crate) fn snapshot(view: &editor::EditorView, keys: &std::collections::BTreeMap<String, Vec<String>>) -> EditorSnapshot {
     EditorSnapshot {
         id: view.id.0,
         title: view.title.clone(),
@@ -101,8 +101,21 @@ pub(crate) fn snapshot(view: &editor::EditorView) -> EditorSnapshot {
             message: n.message.clone(),
             seq: n.seq,
         }),
-        hint: view.hint.to_string(),
+        hint: hint(view.readonly, keys),
     }
+}
+
+/// The footer hint with the keys this platform and the user's settings
+/// give the commands (`⌘S save · ⌘W close`, `Ctrl+S save · Ctrl+W close`).
+fn hint(readonly: bool, keys: &std::collections::BTreeMap<String, Vec<String>>) -> String {
+    let first = if readonly { ("view-file", "viewer") } else { ("save-file", "save") };
+    [first, ("close-editor", "close")]
+        .into_iter()
+        .filter_map(|(id, what)| {
+            tl_app::keys::shortcut(id, keys, crate::keys::PLATFORM).map(|k| format!("{k} {what}"))
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 #[uniffi::export]
@@ -201,7 +214,7 @@ mod tests {
 
     #[test]
     fn the_snapshot_carries_all_but_the_text() {
-        let s = snapshot(&view());
+        let s = snapshot(&view(), &Default::default());
         assert_eq!(s.id, 7);
         assert_eq!(s.title, "a.rs — ~/src (sudo)");
         assert_eq!(s.full_path, "/home/me/src/a.rs");
@@ -215,7 +228,12 @@ mod tests {
         assert_eq!(prompt.buttons, ["Save", "Don't Save", "Cancel"]);
         let note = s.notification.unwrap();
         assert_eq!((note.kind, note.message.as_str(), note.seq), (ToastKind::Success, "Saved", 2));
-        assert_eq!(s.hint, "⌘S save · ⌘W close");
+        let expected = if cfg!(target_os = "macos") { "⌘S save · ⌘W close" } else { "Ctrl+S save · Ctrl+W close" };
+        assert_eq!(s.hint, expected);
+        let mut keys = std::collections::BTreeMap::new();
+        keys.insert("save-file".to_string(), vec!["f2".to_string()]);
+        keys.insert("close-editor".to_string(), vec![]);
+        assert_eq!(snapshot(&view(), &keys).hint, "F2 save", "the user's keys, an unbound one left out");
     }
 
     #[test]

@@ -442,7 +442,7 @@ pub(crate) fn build(view: &ViewModel, t: &mut Trackers) -> Snapshot {
                 },
             })
             .collect(),
-        editors: view.editors.iter().map(editor::snapshot).collect(),
+        editors: view.editors.iter().map(|e| editor::snapshot(e, &view.settings.keys)).collect(),
         settings_requests: view.settings_requests,
         locations_request: view.locations_request.map(|(side, serial)| LocationsRequest {
             side: side.into(),
