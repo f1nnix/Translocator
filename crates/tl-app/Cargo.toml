@@ -1,0 +1,16 @@
+[package]
+name = "tl-app"
+description = "Translocator's Crux core: every piece of application state and behaviour, side-effect-free, driven by events and answered through effects"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+tl-model.workspace = true
+crux_core = "0.20"
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+crux_core = { version = "0.20", features = ["testing"] }
