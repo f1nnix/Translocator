@@ -1,0 +1,9 @@
+[package]
+name = "tl-themes"
+description = "Translocator's colour schemes: the catalogue, the published palettes and the colour maths every shell derives its theme from"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]

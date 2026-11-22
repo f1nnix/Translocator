@@ -17,6 +17,8 @@ tl-app.workspace = true
 tl-runtime.workspace = true
 # Only for the askpass client mode in `main`.
 tl-core.workspace = true
+# The colour schemes, shared with the macOS app.
+tl-themes.workspace = true
 
 chrono.workspace = true
 env_logger.workspace = true
