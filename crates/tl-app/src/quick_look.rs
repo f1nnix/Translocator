@@ -407,6 +407,7 @@ mod tests {
                 host: None,
                 server_info: None,
                 local_home: None,
+                machine: None,
             });
             Harness { model, cmds: Vec::new() }
         }

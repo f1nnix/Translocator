@@ -175,6 +175,8 @@ impl Work {
 }
 
 /// What a finished job hands back.
+// A message that lives for one update; boxing would only move the bytes.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum JobOutput {
     Done,

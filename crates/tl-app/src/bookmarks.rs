@@ -649,6 +649,7 @@ mod tests {
             host: None,
             server_info: None,
             local_home: Some("/Users/me".into()),
+            machine: None,
         });
         let mut web = Bookmark::with_id("b-web", "web", "ssh");
         web.set("host", "web-1");

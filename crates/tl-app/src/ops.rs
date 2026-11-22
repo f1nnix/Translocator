@@ -465,7 +465,7 @@ fn route_hint(model: &Model, src: ConnId, dst: ConnId, mode: TransferMode) -> St
     let conns = &model.conns;
     let place = |host: ConnId| {
         if conns.is_local(host) {
-            "on this Mac".to_string()
+            format!("on {}", conns.machine())
         } else {
             format!("on {} with its own tar/zip", conns.label(host))
         }
@@ -482,15 +482,15 @@ fn route_hint(model: &Model, src: ConnId, dst: ConnId, mode: TransferMode) -> St
     };
     if conns.location_key(src) == conns.location_key(dst) {
         if conns.is_local(src) {
-            "Runs on this Mac.".into()
+            format!("Runs on {}.", conns.machine())
         } else {
-            format!("Runs `{verb}` on {} — no data passes through this Mac.", conns.label(src))
+            format!("Runs `{verb}` on {} — no data passes through {}.", conns.label(src), conns.machine())
         }
     } else {
         match (conns.is_local(src), conns.is_local(dst)) {
             (true, false) => format!("Uploads to {} through ssh (tar stream).", conns.label(dst)),
             (false, true) => format!("Downloads from {} through ssh (tar stream).", conns.label(src)),
-            _ => format!("Streams {} → {} through this Mac.", conns.label(src), conns.label(dst)),
+            _ => format!("Streams {} → {} through {}.", conns.label(src), conns.label(dst), conns.machine()),
         }
     }
 }

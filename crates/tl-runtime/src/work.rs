@@ -46,6 +46,8 @@ pub(crate) fn conn_info(id: ConnId, vfs: &dyn Vfs, bookmark: Option<String>, hos
         host,
         server_info: vfs.server_info(),
         local_home: if local { local_home() } else { None },
+        // How messages name this machine ("Runs on this Mac.").
+        machine: local.then(|| if cfg!(target_os = "macos") { "this Mac" } else { "this computer" }.to_string()),
         plugin,
     }
 }

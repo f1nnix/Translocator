@@ -89,6 +89,7 @@ impl Shell {
                             host: None,
                             server_info: None,
                             local_home: Some("/home".into()),
+                            machine: None,
                         };
                         let out = PluginOutput::Plugins { plugins: vec![], local };
                         self.core.resolve(&mut req, out).unwrap()

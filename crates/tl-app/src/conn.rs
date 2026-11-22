@@ -31,6 +31,10 @@ pub struct ConnInfo {
     pub server_info: Option<String>,
     /// The user's home directory on this machine, for writing `~`.
     pub local_home: Option<String>,
+    /// For the local file system: how messages name this machine ("this
+    /// Mac", "this computer"). The shell knows which platform it is.
+    #[serde(default)]
+    pub machine: Option<String>,
 }
 
 impl ConnInfo {
@@ -144,8 +148,15 @@ impl Conns {
         let host = self.host_of(id);
         match self.get(host) {
             Some(info) if !info.is_local() => info.label.clone(),
-            _ => THIS_MACHINE.into(),
+            _ => self.machine(),
         }
+    }
+
+    /// How messages name the local machine: "this Mac", "this computer".
+    pub fn machine(&self) -> String {
+        self.local()
+            .and_then(|c| c.machine.clone())
+            .unwrap_or_else(|| THIS_MACHINE.into())
     }
 
     pub fn label(&self, id: ConnId) -> String {
@@ -165,5 +176,5 @@ impl Conns {
     }
 }
 
-/// How the local machine is named in messages.
-pub const THIS_MACHINE: &str = "this Mac";
+/// How the local machine is named when the shell does not say.
+pub const THIS_MACHINE: &str = "this computer";

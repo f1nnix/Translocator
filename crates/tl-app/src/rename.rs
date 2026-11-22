@@ -379,6 +379,7 @@ mod tests {
             host: None,
             server_info: None,
             local_home: Some("/home/me".into()),
+            machine: None,
         });
         model
     }
