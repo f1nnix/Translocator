@@ -1,0 +1,6 @@
+# Made by build-core.sh
+/build/
+/Sources/TLCore/TLCore.swift
+# SwiftPM
+/.build/
+/.swiftpm/

@@ -1,0 +1,37 @@
+[package]
+name = "tl-ffi"
+description = "Translocator's foreign-function layer: the Crux core and its runtime behind a UniFFI interface, with display-ready snapshots for native shells (the macOS app)"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "tl_ffi"
+# The static library is what the macOS app links; the rlib is for the tests
+# and the bindings generator below.
+crate-type = ["staticlib", "rlib"]
+
+[[bin]]
+# Writes the Swift bindings from the built library (`macos/build-core.sh`).
+name = "uniffi-bindgen-swift"
+path = "src/bin/uniffi-bindgen-swift.rs"
+required-features = ["cli"]
+
+[features]
+cli = ["uniffi/cli"]
+
+[dependencies]
+tl-app.workspace = true
+tl-runtime.workspace = true
+# Only for the askpass client.
+tl-core.workspace = true
+uniffi = "0.32"
+chrono.workspace = true
+env_logger.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
