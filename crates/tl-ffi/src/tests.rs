@@ -174,3 +174,78 @@ fn dialogs_and_keys_reach_the_snapshot() {
     assert_eq!(copy.bindings[0].keys, "f9");
     f.rt.shutdown();
 }
+
+#[test]
+fn the_bookmark_editor_and_manager_reach_the_snapshot() {
+    use crate::bookmarks::{BookmarkFieldKind, BookmarkIcon, BookmarksInput};
+    use crate::snapshot::DialogKindSnapshot;
+
+    let f = Fixture::start();
+    let editor = |s: &Snapshot| {
+        s.dialogs.iter().rev().find_map(|d| match &d.kind {
+            DialogKindSnapshot::BookmarkEdit { dialog } => Some((d.id, dialog.clone())),
+            _ => None,
+        })
+    };
+    let snap = f.command(Command::NewBookmark);
+    let (id, edit) = editor(&snap).expect("the editor opens");
+    assert_eq!((edit.title.as_str(), edit.is_new, edit.plugin.as_str()), ("New Bookmark", true, "ssh"));
+    assert!(edit.plugins.iter().any(|p| p.id == "local"), "{:?}", edit.plugins);
+    assert_eq!(edit.autofocus.as_deref(), Some("host"));
+    assert!(!edit.description.is_empty());
+    assert!(edit.has_advanced && !edit.advanced);
+    assert_eq!(edit.advanced_label, "Show advanced options");
+    assert!(edit.fields.iter().all(|f| !f.advanced));
+    let basic = edit.fields.len();
+
+    f.core.send(Input::Bookmarks {
+        input: BookmarksInput::ToggleAdvanced { dialog: id },
+    });
+    let (_, edit) = editor(&f.wait(|s| editor(s).is_some_and(|(_, e)| e.advanced))).unwrap();
+    assert!(edit.fields.len() > basic);
+    assert_eq!(edit.advanced_label, "Hide advanced options");
+
+    // A local folder: one path field, which "Choose…" fills in.
+    f.core.send(Input::Bookmarks {
+        input: BookmarksInput::Plugin {
+            dialog: id,
+            plugin: "local".into(),
+        },
+    });
+    let (_, edit) = editor(&f.wait(|s| editor(s).is_some_and(|(_, e)| e.plugin == "local"))).unwrap();
+    assert!(edit.picks_directories);
+    assert_eq!(edit.fields.len(), 1);
+    assert_eq!((edit.fields[0].key.as_str(), edit.fields[0].kind), ("path", BookmarkFieldKind::LocalPath));
+    f.core.send(Input::Bookmarks {
+        input: BookmarksInput::PathChosen {
+            dialog: id,
+            key: "path".into(),
+            path: b"/tmp".to_vec(),
+        },
+    });
+    let (_, edit) = editor(&f.wait(|s| editor(s).is_some_and(|(_, e)| !e.fields[0].value.is_empty()))).unwrap();
+    assert_eq!(edit.fields[0].value, "/tmp");
+    f.core.send(Input::Bookmarks {
+        input: BookmarksInput::Save { dialog: id, open: false },
+    });
+    let snap = f.wait(|s| editor(s).is_none() && s.bookmarks.len() == 1);
+    assert!(snap.dialogs.is_empty());
+
+    // The manager lists it.
+    let snap = f.command(Command::ManageBookmarks);
+    let manager = snap
+        .dialogs
+        .iter()
+        .find_map(|d| match &d.kind {
+            DialogKindSnapshot::Bookmarks { dialog } => Some(dialog.clone()),
+            _ => None,
+        })
+        .expect("the manager opens");
+    assert_eq!(manager.title, "Bookmarks");
+    assert!(!manager.empty_text.is_empty());
+    let row = &manager.rows[0];
+    assert_eq!(row.icon, BookmarkIcon::Local);
+    assert!(!row.can_move_up && !row.can_move_down && !row.connected);
+    assert_eq!(row.open_label, "Connect");
+    f.rt.shutdown();
+}

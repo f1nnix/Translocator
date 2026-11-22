@@ -15,13 +15,14 @@
 //!
 //! Areas filled in separately (each module says what it still needs):
 //! [`rename`], [`sync`], [`properties`], [`bookmarks`], [`editor`],
-//! [`quick_look`], [`settings`].
+//! [`quick_look`], [`settings`]; the colour schemes are [`themes`].
 
 uniffi::setup_scaffolding!();
 
 pub mod bookmarks;
 pub mod editor;
 pub mod format;
+pub mod highlight;
 pub mod host;
 pub mod input;
 pub mod keys;
@@ -32,6 +33,7 @@ pub mod rows;
 pub mod settings;
 pub mod snapshot;
 pub mod sync;
+pub mod themes;
 pub mod types;
 mod versions;
 

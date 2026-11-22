@@ -348,6 +348,8 @@ pub(crate) struct Trackers {
     settings: Tracker<usize>,
     keys: Tracker<BTreeMap<String, Vec<String>>>,
     finds: HashMap<u64, Tracker<usize>>,
+    rename: rename::Previews,
+    sync: sync::Lists,
 }
 
 pub(crate) fn build(view: &ViewModel, t: &mut Trackers) -> Snapshot {
@@ -371,12 +373,20 @@ pub(crate) fn build(view: &ViewModel, t: &mut Trackers) -> Snapshot {
                         version,
                     }
                 }
-                other => dialog_kind(other),
+                DialogKind::Rename(r) => DialogKindSnapshot::Rename {
+                    dialog: t.rename.snapshot(d.id.0, r),
+                },
+                DialogKind::Sync(s) => DialogKindSnapshot::Sync {
+                    dialog: t.sync.snapshot(d.id.0, s, date_format),
+                },
+                other => dialog_kind(other, view),
             };
             DialogSnapshot { id: d.id.0, kind }
         })
         .collect();
     t.finds = kept;
+    t.rename.retain(&view.dialogs);
+    t.sync.retain(&view.dialogs);
 
     let [left, right] = &view.panes;
     let left = pane(left, Side::Left, t.listing[0].version(listing_key(left, date_format)));
@@ -543,7 +553,7 @@ fn job(j: &JobView) -> JobSnapshot {
     }
 }
 
-fn dialog_kind(kind: &DialogKind) -> DialogKindSnapshot {
+fn dialog_kind(kind: &DialogKind, view: &ViewModel) -> DialogKindSnapshot {
     match kind {
         DialogKind::Input(d) => DialogKindSnapshot::Input {
             dialog: InputDialogSnapshot {
@@ -589,17 +599,17 @@ fn dialog_kind(kind: &DialogKind) -> DialogKindSnapshot {
             },
         },
         DialogKind::Rename(d) => DialogKindSnapshot::Rename {
-            dialog: rename::snapshot(d),
+            dialog: rename::snapshot(d, 0),
         },
-        DialogKind::Sync(d) => DialogKindSnapshot::Sync { dialog: sync::snapshot(d) },
+        DialogKind::Sync(d) => DialogKindSnapshot::Sync { dialog: sync::snapshot(d, 0) },
         DialogKind::Properties(d) => DialogKindSnapshot::Properties {
             dialog: properties::snapshot(d),
         },
         DialogKind::BookmarkEdit(d) => DialogKindSnapshot::BookmarkEdit {
-            dialog: bookmarks::edit_snapshot(d),
+            dialog: bookmarks::edit_snapshot(d, view),
         },
         DialogKind::Bookmarks(d) => DialogKindSnapshot::Bookmarks {
-            dialog: bookmarks::manager_snapshot(d),
+            dialog: bookmarks::manager_snapshot(d, view),
         },
     }
 }

@@ -53,6 +53,8 @@ struct CommandLineBar: View {
 /// the end.
 struct ConsoleView: NSViewRepresentable {
     let text: String
+    /// The content layer's scheme (`Theme`), read here so a change redraws.
+    var colors = Theme.shared.colors
 
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSTextView.scrollableTextView()
@@ -68,7 +70,13 @@ struct ConsoleView: NSViewRepresentable {
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        guard let view = scroll.documentView as? NSTextView, view.string != text else { return }
+        guard let view = scroll.documentView as? NSTextView else { return }
+        if view.backgroundColor != colors.background {
+            view.backgroundColor = colors.background
+            view.textColor = colors.text
+            view.insertionPointColor = colors.text
+        }
+        guard view.string != text else { return }
         view.string = text
         view.scrollToEndOfDocument(nil)
     }

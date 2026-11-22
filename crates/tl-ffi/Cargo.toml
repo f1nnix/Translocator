@@ -24,6 +24,8 @@ cli = ["uniffi/cli"]
 [dependencies]
 tl-app.workspace = true
 tl-runtime.workspace = true
+# The colour schemes the content layer is painted in.
+tl-themes.workspace = true
 # Only for the askpass client.
 tl-core.workspace = true
 uniffi = "0.32"
@@ -31,6 +33,26 @@ chrono.workspace = true
 env_logger.workspace = true
 log.workspace = true
 parking_lot.workspace = true
+# Syntax colours for the viewer, editor and quick look (`highlight`): the
+# grammars the GPUI shell colours with, through their own queries.
+tree-sitter = "0.26"
+tree-sitter-bash = "0.23"
+tree-sitter-c = "0.24"
+tree-sitter-cpp = "0.23"
+tree-sitter-css = "0.23"
+tree-sitter-diff = "0.1"
+tree-sitter-go = "0.23"
+tree-sitter-html = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-json = "0.24"
+tree-sitter-make = "1"
+tree-sitter-md = "0.5"
+tree-sitter-python = "0.23"
+tree-sitter-rust = "0.24"
+tree-sitter-sequel = "0.3"
+tree-sitter-toml-ng = "0.7"
+tree-sitter-typescript = "0.23"
+tree-sitter-yaml = "0.7"
 
 [dev-dependencies]
 serde_json.workspace = true

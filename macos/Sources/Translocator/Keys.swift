@@ -74,7 +74,8 @@ struct KeyMap {
 
     // ----- key events -----------------------------------------------------
 
-    private static let named: [UInt16: String] = [
+    /// Key names by key code (the settings window records keys with it).
+    static let named: [UInt16: String] = [
         126: "up", 125: "down", 123: "left", 124: "right",
         116: "pageup", 121: "pagedown", 115: "home", 119: "end",
         36: "enter", 76: "enter", 48: "tab", 53: "escape",

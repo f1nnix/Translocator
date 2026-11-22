@@ -38,6 +38,8 @@ struct FileTable: NSViewRepresentable {
     let pane: PaneSnapshot
     let general: GeneralSettings
     let active: Bool
+    /// Read here so that a change of colour scheme updates the list.
+    var colors = Theme.shared.colors
     @Environment(AppStore.self) private var store
 
     func makeCoordinator() -> FileTableCoordinator {
@@ -82,11 +84,13 @@ struct FileTable: NSViewRepresentable {
         scroll.postsFrameChangedNotifications = true
         coordinator.observeWidth(of: scroll)
         store.register(table, for: side)
+        coordinator.apply(colors: colors)
         coordinator.apply(pane: pane, general: general, active: active)
         return scroll
     }
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
+        context.coordinator.apply(colors: colors)
         context.coordinator.apply(pane: pane, general: general, active: active)
     }
 }
@@ -147,6 +151,7 @@ final class FileTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDe
 
     private(set) var pane: PaneSnapshot?
     private var general: GeneralSettings?
+    private var colors: ContentColors?
     private var cache: [Int: Row] = [:]
     private static let page = 64
     private var narrow = -1
@@ -164,6 +169,16 @@ final class FileTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     // ----- taking in a snapshot -----------------------------------------------
+
+    /// The colour scheme (`Theme`): the canvas, and every row redrawn.
+    func apply(colors next: ContentColors) {
+        guard let table, next != colors else { return }
+        let first = colors == nil
+        colors = next
+        table.backgroundColor = next.background
+        table.enclosingScrollView?.backgroundColor = next.background
+        if !first { table.reloadData() }
+    }
 
     func apply(pane next: PaneSnapshot, general nextGeneral: GeneralSettings, active: Bool) {
         guard let table else { return }
@@ -305,13 +320,15 @@ final class FileTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDe
         view.cursor = cursor
         view.focused = focused
         view.marked = self.row(row)?.marked ?? false
+        view.colors = colors ?? .system
         view.needsDisplay = true
     }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row ix: Int) -> NSView? {
         guard let column = FileColumn(tableColumn?.identifier), let row = row(ix), let pane, let general else { return nil }
         let cursor = Int(pane.cursor) == ix
-        let style = RowStyle(row: row, cursor: cursor, focused: cursor && focused, fontSize: CGFloat(general.fontSize))
+        let style = RowStyle(row: row, cursor: cursor, focused: cursor && focused, fontSize: CGFloat(general.fontSize),
+                             colors: colors ?? .system)
         if column == .name {
             let cell = (tableView.makeView(withIdentifier: NameCell.identifier, owner: nil) as? NameCell) ?? NameCell()
             cell.show(row, style: style, icons: general.showIcons)
@@ -383,22 +400,24 @@ struct RowStyle {
     /// The cursor, in the list with the keyboard: the accent band.
     let focused: Bool
     let fontSize: CGFloat
+    /// The content layer's scheme (`Theme`).
+    let colors: ContentColors
 
     var text: NSColor {
-        if focused { return .alternateSelectedControlTextColor }
-        if row.marked { return .systemOrange }
-        return .labelColor
+        if focused && (colors.isSystem || !row.marked) { return colors.cursorText }
+        if row.marked { return colors.marked }
+        return colors.text
     }
 
     var muted: NSColor {
-        focused ? .alternateSelectedControlTextColor.withAlphaComponent(0.85) : .secondaryLabelColor
+        focused ? colors.cursorSecondary : colors.secondary
     }
 
     var icon: NSColor {
-        if focused { return .alternateSelectedControlTextColor }
-        if row.isDir { return .systemBlue }
-        if row.executable { return .systemGreen }
-        return .secondaryLabelColor
+        if focused && colors.isSystem { return colors.cursorText }
+        if row.isDir { return colors.folder }
+        if row.executable { return colors.executable }
+        return colors.secondary
     }
 
     var font: NSFont {
@@ -413,12 +432,13 @@ final class FileRowView: NSTableRowView {
     var cursor = false
     var focused = false
     var marked = false
+    var colors = ContentColors.system
 
     override func drawBackground(in dirtyRect: NSRect) {
         let color: NSColor? =
-            if cursor && focused { .selectedContentBackgroundColor }
-            else if cursor { .unemphasizedSelectedContentBackgroundColor }
-            else if marked { NSColor.systemOrange.withAlphaComponent(0.14) }
+            if cursor && focused { colors.cursor }
+            else if cursor { colors.cursorInactive }
+            else if marked { colors.markedBackground }
             else { nil }
         guard let color else { return }
         color.setFill()

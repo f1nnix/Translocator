@@ -24,7 +24,7 @@ struct TranslocatorApp: App {
                 EditorWindow(id: id).environment(store)
             }
         }
-        .defaultSize(width: 900, height: 700)
+        .defaultSize(width: 960, height: 720)
 
         Settings {
             SettingsWindow().environment(store)

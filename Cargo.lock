@@ -8109,6 +8109,25 @@ dependencies = [
  "tl-app",
  "tl-core",
  "tl-runtime",
+ "tl-themes",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "tree-sitter-c",
+ "tree-sitter-cpp",
+ "tree-sitter-css",
+ "tree-sitter-diff",
+ "tree-sitter-go",
+ "tree-sitter-html",
+ "tree-sitter-javascript",
+ "tree-sitter-json",
+ "tree-sitter-make",
+ "tree-sitter-md",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-sequel",
+ "tree-sitter-toml-ng",
+ "tree-sitter-typescript",
+ "tree-sitter-yaml",
  "uniffi",
 ]
 
@@ -8192,6 +8211,10 @@ dependencies = [
  "tl-local",
  "zip",
 ]
+
+[[package]]
+name = "tl-themes"
+version = "0.2.3"
 
 [[package]]
 name = "tl-webdav"
@@ -8447,6 +8470,7 @@ dependencies = [
  "tl-app",
  "tl-core",
  "tl-runtime",
+ "tl-themes",
 ]
 
 [[package]]

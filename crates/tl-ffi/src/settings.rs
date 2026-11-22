@@ -2,17 +2,18 @@
 //!
 //! Owns what the settings window reads ([`SettingsSnapshot`], carried in
 //! `Snapshot.settings` because the main window needs the list's font, row
-//! height and date format too) and what it sends ([`SettingsEdit`], the
-//! full mirror of `tl_app::model::SettingsEdit`).
+//! height and date format too), what it sends ([`SettingsEdit`], the full
+//! mirror of `tl_app::model::SettingsEdit`), and the fixed text of its
+//! controls: the pickers' labels ([`sort_key_choices`],
+//! [`date_format_choices`], [`appearance_mode_choices`]), the ranges of the
+//! steppers ([`settings_ranges`]) and the terminal field's help. The key
+//! bindings page reads `crate::keys`; the theme pickers `crate::themes`.
 //!
-//! The Swift side is `macos/Sources/Translocator/Areas/SettingsWindow.swift`
-//! (a stub today). Still to add here for it: labels for the pickers
-//! (`DateFormat::label`, `SortKey::label`, `AppearanceMode::label` from
-//! tl-app), and whatever the key-binding page needs beyond `crate::keys`.
+//! The Swift side is `macos/Sources/Translocator/Areas/SettingsWindow.swift`.
 //! Keep the boundary: records and conversions only, no decisions.
 
 use tl_app::model;
-use tl_app::settings::Settings;
+use tl_app::settings::{self as core, Settings};
 
 use crate::types::{AppearanceMode, DateFormat, SortKey};
 
@@ -48,8 +49,8 @@ pub struct GeneralSettings {
 #[derive(uniffi::Record, Clone, Debug, PartialEq)]
 pub struct AppearanceSettings {
     pub mode: AppearanceMode,
-    /// Theme names of the GPUI shell; the native app follows the system
-    /// look and only uses `mode`.
+    /// The theme used while the appearance is light, as `crate::themes`
+    /// names it ("Default Light" is the system's own colours).
     pub light: String,
     pub dark: String,
 }
@@ -125,5 +126,104 @@ impl From<SettingsEdit> for model::SettingsEdit {
             SettingsEdit::Keys { command, keys } => E::Keys { command, keys },
             SettingsEdit::ResetGeneral => E::ResetGeneral,
         }
+    }
+}
+
+/// One entry of the "Sort new tabs by" picker.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct SortKeyChoice {
+    pub key: SortKey,
+    /// "Date modified".
+    pub label: String,
+}
+
+/// One entry of the "Dates" picker.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DateFormatChoice {
+    pub format: DateFormat,
+    /// An example date ("15.10.2026 14:32"), which says more than a name.
+    pub label: String,
+}
+
+/// One entry of the "Use" (appearance) picker.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct AppearanceModeChoice {
+    pub mode: AppearanceMode,
+    pub label: String,
+}
+
+/// What the text-size and row-height steppers offer (the core holds the
+/// settings to the same ranges).
+#[derive(uniffi::Record, Clone, Debug, PartialEq)]
+pub struct SettingsRanges {
+    pub font_size_min: f32,
+    pub font_size_max: f32,
+    pub row_height_min: f32,
+    pub row_height_max: f32,
+}
+
+#[uniffi::export]
+pub fn sort_key_choices() -> Vec<SortKeyChoice> {
+    core::SortKey::ALL
+        .iter()
+        .map(|k| SortKeyChoice {
+            key: (*k).into(),
+            label: k.label().to_string(),
+        })
+        .collect()
+}
+
+#[uniffi::export]
+pub fn date_format_choices() -> Vec<DateFormatChoice> {
+    core::DateFormat::ALL
+        .iter()
+        .map(|f| DateFormatChoice {
+            format: (*f).into(),
+            label: f.label().to_string(),
+        })
+        .collect()
+}
+
+#[uniffi::export]
+pub fn appearance_mode_choices() -> Vec<AppearanceModeChoice> {
+    core::AppearanceMode::ALL
+        .iter()
+        .map(|m| AppearanceModeChoice {
+            mode: (*m).into(),
+            label: m.label().to_string(),
+        })
+        .collect()
+}
+
+#[uniffi::export]
+pub fn settings_ranges() -> SettingsRanges {
+    SettingsRanges {
+        font_size_min: core::FONT_SIZE.0,
+        font_size_max: core::FONT_SIZE.1,
+        row_height_min: core::ROW_HEIGHT.0,
+        row_height_max: core::ROW_HEIGHT.1,
+    }
+}
+
+/// The help under the terminal field, on macOS.
+#[uniffi::export]
+pub fn terminal_help() -> String {
+    "A command to run instead of Terminal.app, for example `open -a iTerm`. Empty uses Terminal.app.".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_pickers_list_every_choice_with_the_cores_labels() {
+        let sorts = sort_key_choices();
+        assert_eq!(sorts.len(), 4);
+        assert_eq!(sorts[3].key, SortKey::Modified);
+        assert_eq!(sorts[3].label, "Date modified");
+        assert_eq!(date_format_choices()[1].label, "15.10.2026 14:32");
+        assert_eq!(appearance_mode_choices()[0].label, "System");
+        let r = settings_ranges();
+        assert!(r.font_size_min < r.font_size_max && r.row_height_min < r.row_height_max);
     }
 }
