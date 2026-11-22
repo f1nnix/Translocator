@@ -206,8 +206,19 @@ pub fn conflicts(keys: &str, with: &CommandSpec, overrides: &BTreeMap<String, Ve
     COMMANDS
         .iter()
         .filter(|other| other.id != with.id && other.context == with.context)
-        .filter(|other| other.keys(overrides).contains(&keys))
+        .filter(|other| other.keys(overrides).iter().any(|k| same_keys(k, keys)))
         .collect()
+}
+
+/// Whether two bindings are the same keys, however their modifiers are
+/// ordered (`cmd-shift-g` and `shift-cmd-g` are one binding).
+pub fn same_keys(a: &str, b: &str) -> bool {
+    let canonical = |keys: &str| -> Vec<String> {
+        keys.split_whitespace()
+            .map(|part| Keystroke::parse(part).map(|s| s.unparse()).unwrap_or_else(|| part.to_string()))
+            .collect()
+    };
+    canonical(a) == canonical(b)
 }
 
 /// The first key of a command, as a label.
@@ -410,6 +421,11 @@ mod tests {
         assert_eq!(pretty("cmd-shift-g", Platform::Mac), "⇧⌘G");
         assert_eq!(pretty("ctrl-alt-backspace", Platform::Other), "Ctrl+Alt+Backspace");
         assert_eq!(pretty("ctrl-x ctrl-s", Platform::Mac), "⌃X ⌃S");
+        assert!(same_keys("cmd-shift-g", "shift-cmd-g"));
+        assert!(!same_keys("cmd-g", "cmd-shift-g"));
+        let go_to = command("go-to-path").unwrap();
+        let none = BTreeMap::new();
+        assert!(conflicts("shift-cmd-h", go_to, &none).iter().any(|c| c.id == "go-home"));
     }
 
     #[test]
