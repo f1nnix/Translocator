@@ -41,7 +41,7 @@ To build it yourself:
 
 ```bash
 sudo scripts/linux-deps.sh build        # Linux, once; knows apt and dnf
-cargo build --release -p translocator
+cargo build --release -p translocator-gtk  # GTK 4 app → target/release/translocator
 ```
 
 ```bash

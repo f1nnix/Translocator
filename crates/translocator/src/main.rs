@@ -28,9 +28,10 @@ mod workspace;
 use gpui_kit::component::TitleBar;
 use gpui_kit::*;
 
-/// Matches the basename of `packaging/translocator.desktop`: that is how a
-/// Linux desktop finds this window's icon, through `app_id` on Wayland and
-/// `WM_CLASS` on X11.
+/// How a Linux desktop finds this window's icon, through `app_id` on
+/// Wayland and `WM_CLASS` on X11: the basename of the desktop file this
+/// shell was packaged with (`translocator.desktop`; the packages now ship
+/// the GTK app instead).
 const APP_ID: &str = "translocator";
 
 /// X11 takes a window's icon from the window itself, as pixels. Wayland and

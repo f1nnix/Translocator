@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata for software centres: installed to /usr/share/metainfo. -->
+<component type="desktop-application">
+  <id>dev.translocator.Translocator</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <name>Translocator</name>
+  <summary>Dual-pane file manager with SSH, S3 and WebDAV locations</summary>
+  <developer id="dev.translocator">
+    <name>Ilya Rusanen</name>
+  </developer>
+
+  <description>
+    <p>
+      Translocator is a classic dual-pane file manager: two folders side by
+      side, everything from the keyboard, copies and moves queued in the
+      background with per-item conflict resolution.
+    </p>
+    <p>
+      Either pane can show a local disk, an SSH server, an S3 account or a
+      WebDAV share. The SSH location runs ordinary shell commands over one
+      multiplexed OpenSSH connection, with your own ssh setup and nothing
+      installed on the server, so copies between two folders on one server
+      never travel through this machine, and sudo works as in a terminal.
+    </p>
+    <ul>
+      <li>Type to filter a list, mark with Space, saved folders per host</li>
+      <li>Compare and synchronize folders, rename many files from masks</li>
+      <li>Open archives as folders, compress and extract</li>
+      <li>View and edit files, including those on a server</li>
+      <li>A quick preview in place of the other pane</li>
+      <li>Ten colour schemes, each with a light and a dark variant</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">dev.translocator.Translocator.desktop</launchable>
+  <provides>
+    <binary>translocator</binary>
+  </provides>
+
+  <url type="homepage">https://github.com/f1nnix/Translocator</url>
+  <url type="bugtracker">https://github.com/f1nnix/Translocator/issues</url>
+  <url type="vcs-browser">https://github.com/f1nnix/Translocator</url>
+
+  <categories>
+    <category>Utility</category>
+    <category>FileTools</category>
+    <category>FileManager</category>
+  </categories>
+  <keywords>
+    <keyword>file manager</keyword>
+    <keyword>dual-pane</keyword>
+    <keyword>commander</keyword>
+    <keyword>ssh</keyword>
+    <keyword>s3</keyword>
+    <keyword>webdav</keyword>
+  </keywords>
+
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">760</display_length>
+  </requires>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.3.0" date="2026-11-22">
+      <description>
+        <p>The Linux packages now ship the GTK 4 and libadwaita app.</p>
+      </description>
+    </release>
+    <release version="0.2.3" date="2026-11-21"/>
+  </releases>
+</component>

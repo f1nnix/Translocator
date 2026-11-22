@@ -1,8 +1,10 @@
 name: Linux
 
 # Ubuntu and Fedora are built on their own distribution, because each package
-# links against that distribution's glibc and libraries. macOS is not here
-# yet: releasing it needs signing and notarization keys.
+# links against that distribution's glibc and libraries. The packages ship the
+# GTK app (crates/translocator-gtk, binary `translocator`); the GPUI shell
+# (crates/translocator) is still tested on Ubuntu but no longer packaged.
+# macOS is not here yet: releasing it needs signing and notarization keys.
 
 on:
   push:
@@ -57,7 +59,7 @@ jobs:
           key: ubuntu-24.04
 
       - name: Build
-        run: cargo build --locked --release -p translocator
+        run: cargo build --locked --release -p translocator-gtk
 
       # The same scripts developers use; their output names the endpoints
       # and credentials the provider tests look for. Without them those
@@ -81,7 +83,7 @@ jobs:
       - name: Build .deb
         run: |
           cargo install cargo-deb --locked --version ^3
-          cargo deb -p translocator --no-build
+          cargo deb -p translocator-gtk --no-build
 
       - name: Check the package
         run: |
@@ -94,6 +96,10 @@ jobs:
           # Every shared library the binary needs must now resolve.
           ldd "$(command -v translocator)"
           ! ldd "$(command -v translocator)" | grep -q "not found"
+          # The desktop entry and the AppStream metadata are well-formed.
+          sudo apt-get install -y --no-install-recommends desktop-file-utils appstream
+          desktop-file-validate /usr/share/applications/dev.translocator.Translocator.desktop
+          appstreamcli validate --no-net /usr/share/metainfo/dev.translocator.Translocator.metainfo.xml
 
       - uses: actions/upload-artifact@v4
         with:
@@ -129,7 +135,7 @@ jobs:
           key: fedora-latest
 
       - name: Build
-        run: cargo build --locked --release -p translocator
+        run: cargo build --locked --release -p translocator-gtk
 
       # The test suite runs in the Ubuntu job. Repeating it here would mean
       # a second, debug-profile copy of the whole dependency tree, and this
@@ -138,7 +144,7 @@ jobs:
       - name: Build .rpm
         run: |
           cargo install cargo-generate-rpm --locked --version ^0.21
-          cargo generate-rpm -p crates/translocator
+          cargo generate-rpm -p crates/translocator-gtk
 
       - name: Check the package
         run: |

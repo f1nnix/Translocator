@@ -5,7 +5,7 @@
 set -eu
 
 cargo build -p translocator-gtk
-bin=/target/debug/translocator-gtk
+bin=/target/debug/translocator
 
 export HOME=/tmp/home
 rm -rf "$HOME" && mkdir -p "$HOME"

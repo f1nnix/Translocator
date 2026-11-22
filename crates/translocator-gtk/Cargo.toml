@@ -1,14 +1,17 @@
 [package]
 name = "translocator-gtk"
-description = "Translocator's GTK 4 and libadwaita shell for Linux, on the shared Crux core (through tl-ffi)"
+# The Linux app: GTK 4 and libadwaita over the shared Crux core (through
+# tl-ffi). The description is the packages' one-line summary.
+description = "Dual-pane file manager with SSH, S3 and WebDAV locations"
 repository = "https://github.com/f1nnix/Translocator"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
 publish = false
 
+# What Linux ships: the packages below install it as /usr/bin/translocator.
 [[bin]]
-name = "translocator-gtk"
+name = "translocator"
 path = "src/main.rs"
 
 [dependencies]
@@ -30,3 +33,63 @@ adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
 sourceview5 = "0.11"
 async-channel = "2"
 serde_json.workspace = true
+
+# ---------------------------------------------------------------------------
+# Linux packaging. Both tools reuse a binary built beforehand, so CI compiles
+# once and packages twice:
+#   cargo build --release -p translocator-gtk
+#   cargo deb -p translocator-gtk --no-build
+#   cargo generate-rpm -p crates/translocator-gtk
+# The desktop file, the icons and the AppStream metadata are named by the
+# application id, dev.translocator.Translocator (`shell::APP_ID`): that is
+# how the desktop and the About dialog find the icon.
+# ---------------------------------------------------------------------------
+
+[package.metadata.deb]
+name = "translocator"
+maintainer = "Ilya Rusanen <ilya@rusanen.co.uk>"
+copyright = "2026 Ilya Rusanen"
+license-file = ["../../LICENSE", "0"]
+section = "utils"
+priority = "optional"
+extended-description = """\
+A classic dual-pane file manager for GNOME and other GTK desktops. Remote \
+locations are plugins: SSH, S3 and WebDAV. The SSH one drives a plain shell \
+on the server through the system OpenSSH client, so copies between two \
+folders on one server never travel through this machine."""
+# $auto covers the linked libraries; the floors are what the app is built
+# against (GNOME 46: GTK 4.14, libadwaita 1.5). The SVG pixbuf loader draws
+# the symbolic icons and is only a recommendation of GTK's, so it is named.
+depends = "$auto, libgtk-4-1 (>= 4.14), libadwaita-1-0 (>= 1.5), libgtksourceview-5-0, librsvg2-common"
+recommends = "openssh-client, xdg-utils"
+assets = [
+    ["target/release/translocator", "usr/bin/", "755"],
+    ["../../packaging/dev.translocator.Translocator.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/dev.translocator.Translocator.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["../../packaging/translocator.svg", "usr/share/icons/hicolor/scalable/apps/dev.translocator.Translocator.svg", "644"],
+    ["../../packaging/translocator-256.png", "usr/share/icons/hicolor/256x256/apps/dev.translocator.Translocator.png", "644"],
+    ["../../README.md", "usr/share/doc/translocator/README.md", "644"],
+]
+
+[package.metadata.generate-rpm]
+name = "translocator"
+summary = "Dual-pane file manager with SSH, S3 and WebDAV locations"
+assets = [
+    { source = "target/release/translocator", dest = "/usr/bin/translocator", mode = "755" },
+    { source = "packaging/dev.translocator.Translocator.desktop", dest = "/usr/share/applications/dev.translocator.Translocator.desktop", mode = "644" },
+    { source = "packaging/dev.translocator.Translocator.metainfo.xml", dest = "/usr/share/metainfo/dev.translocator.Translocator.metainfo.xml", mode = "644" },
+    { source = "packaging/translocator.svg", dest = "/usr/share/icons/hicolor/scalable/apps/dev.translocator.Translocator.svg", mode = "644" },
+    { source = "packaging/translocator-256.png", dest = "/usr/share/icons/hicolor/256x256/apps/dev.translocator.Translocator.png", mode = "644" },
+    { source = "LICENSE", dest = "/usr/share/licenses/translocator/LICENSE", mode = "644", doc = true },
+    { source = "README.md", dest = "/usr/share/doc/translocator/README.md", mode = "644", doc = true },
+]
+# Same floors as the Debian depends above.
+[package.metadata.generate-rpm.requires]
+gtk4 = ">= 4.14"
+libadwaita = ">= 1.5"
+gtksourceview5 = "*"
+librsvg2 = "*"
+
+[package.metadata.generate-rpm.recommends]
+openssh-clients = "*"
+xdg-utils = "*"

@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Translocator
+GenericName=File Manager
+Comment=Dual-pane file manager with SSH, S3 and WebDAV locations
+Exec=translocator
+Icon=dev.translocator.Translocator
+Terminal=false
+Categories=GTK;Utility;FileTools;FileManager;
+Keywords=file;manager;ssh;remote;commander;dual-pane;sftp;s3;webdav;
+StartupNotify=true
+StartupWMClass=dev.translocator.Translocator
