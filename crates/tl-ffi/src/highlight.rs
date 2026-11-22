@@ -110,21 +110,39 @@ pub fn highlight(text: String, language: String) -> Vec<HighlightSpan> {
     spans(&text, &language, HIGHLIGHT_LIMIT, HIGHLIGHT_BUDGET)
 }
 
-/// [`highlight`] with its limits given.
+/// What is parsed again when the whole limit does not parse in time: the
+/// start of the file, which is what is on screen first.
+const FALLBACK_LIMIT: usize = 128 * 1024;
+
+/// [`highlight`] with its limits given. A text that does not parse within
+/// the budget (a slow machine, a huge file) still gets its first
+/// [`FALLBACK_LIMIT`] bytes coloured, with a budget of their own.
 pub fn spans(text: &str, language: &str, limit: usize, budget: Duration) -> Vec<HighlightSpan> {
+    match spans_within(text, language, limit, budget) {
+        Some(spans) => spans,
+        None if limit > FALLBACK_LIMIT && text.len() > FALLBACK_LIMIT => {
+            spans_within(text, language, FALLBACK_LIMIT, budget).unwrap_or_default()
+        }
+        None => Vec::new(),
+    }
+}
+
+/// The spans of the first `limit` bytes, or `None` when they did not parse
+/// within `budget`.
+fn spans_within(text: &str, language: &str, limit: usize, budget: Duration) -> Option<Vec<HighlightSpan>> {
     let Some(grammar) = grammar(language) else {
-        return Vec::new();
+        return Some(Vec::new());
     };
     let started = Instant::now();
     let text = head(text, limit);
     let bytes = text.as_bytes();
     if bytes.is_empty() {
-        return Vec::new();
+        return Some(Vec::new());
     }
 
     let mut parser = Parser::new();
     if parser.set_language(&grammar.language).is_err() {
-        return Vec::new();
+        return Some(Vec::new());
     }
     let mut out_of_time = |_: &ParseState| {
         if started.elapsed() > budget {
@@ -134,10 +152,8 @@ pub fn spans(text: &str, language: &str, limit: usize, budget: Duration) -> Vec<
         }
     };
     let options = ParseOptions::new().progress_callback(&mut out_of_time);
-    let Some(tree) = parser.parse_with_options(&mut |at, _| &bytes[at.min(bytes.len())..], None, Some(options))
-    else {
-        return Vec::new();
-    };
+    // Out of time: no tree.
+    let tree = parser.parse_with_options(&mut |at, _| &bytes[at.min(bytes.len())..], None, Some(options))?;
 
     // (start, end, pattern, paint code)
     let mut found: Vec<(usize, usize, usize, u8)> = Vec::new();
@@ -166,7 +182,7 @@ pub fn spans(text: &str, language: &str, limit: usize, budget: Duration) -> Vec<
             paint[start..end].fill(code);
         }
     }
-    runs(text, &paint)
+    Some(runs(text, &paint))
 }
 
 /// The paint buffer as spans over UTF-16 offsets. A character takes the
@@ -441,6 +457,20 @@ mod tests {
         let end = spans.iter().map(|s| s.start_utf16 + s.len_utf16).max().unwrap();
         assert!(end as usize <= line.len() * 10, "{end}");
         assert_eq!(spans.iter().filter(|s| s.kind == HighlightKind::Comment).count(), 10);
+    }
+
+    #[test]
+    fn a_file_that_does_not_parse_in_time_keeps_its_start_coloured() {
+        let text = "fn f(a: u32) -> u32 { a + 1 } // comment\n".repeat(60_000);
+        assert!(text.len() > 2 * FALLBACK_LIMIT);
+        // No time at all for the whole text: only the fallback is coloured.
+        let spans = spans(&text, "rust", text.len(), Duration::ZERO);
+        let fallback = spans_within(&text, "rust", FALLBACK_LIMIT, Duration::from_secs(10)).unwrap();
+        assert!(spans.is_empty() || spans == fallback);
+        let spans = spans_within(&text, "rust", FALLBACK_LIMIT, Duration::from_secs(10)).unwrap();
+        assert!(!spans.is_empty());
+        let end = spans.iter().map(|s| s.start_utf16 + s.len_utf16).max().unwrap();
+        assert!(end as usize <= FALLBACK_LIMIT, "{end}");
     }
 
     #[test]
