@@ -29,6 +29,9 @@ struct CodeView: NSViewRepresentable {
     var onEdit: (() -> Void)?
     /// The number of lines, after a load and a moment after edits.
     var onLines: ((Int) -> Void)?
+    /// Takes the keyboard once the first text is in (the editor does; quick
+    /// look does not: the file list keeps the keyboard there).
+    var takesFocus = false
 
     func makeCoordinator() -> CodeController { CodeController() }
 
@@ -42,7 +45,13 @@ struct CodeView: NSViewRepresentable {
         controller.setPalette(palette)
         controller.setEditable(editable)
         if controller.revision != revision {
+            let first = controller.revision == nil
             controller.load(text(), language: language, revision: revision)
+            if first && takesFocus {
+                // The view joins its window after this update.
+                let textView = controller.textView
+                DispatchQueue.main.async { textView.window?.makeFirstResponder(textView) }
+            }
         }
     }
 
@@ -144,6 +153,8 @@ final class CodeController: NSObject, NSTextViewDelegate, NSTextStorageDelegate,
     nonisolated(unsafe) private var colors: [HighlightKind: NSColor] = [:]
     /// Bumped by every load and edit: older results are dropped.
     private var generation = 0
+    /// Set while `load` replaces the text: that is no edit.
+    private var loading = false
     private var pending: Task<Void, Never>?
     private var scrollObserver: NSObjectProtocol?
 
@@ -232,6 +243,7 @@ final class CodeController: NSObject, NSTextViewDelegate, NSTextStorageDelegate,
         self.revision = revision
         self.language = language
         pending?.cancel()
+        loading = true
         textView.string = text
         if let storage = textView.textStorage {
             let all = NSRange(location: 0, length: storage.length)
@@ -248,6 +260,7 @@ final class CodeController: NSObject, NSTextViewDelegate, NSTextStorageDelegate,
         textView.setSelectedRange(NSRange(location: 0, length: 0))
         textView.scroll(.zero)
         if textView.isEditable { textView.undoManager?.removeAllActions() }
+        loading = false
         ruler.reset()
         refresh(after: nil)
     }
@@ -274,7 +287,8 @@ final class CodeController: NSObject, NSTextViewDelegate, NSTextStorageDelegate,
     }
 
     /// Counts the lines and colours the text off the main thread, now or a
-    /// moment after the last edit.
+    /// moment after the last edit. The count is reported as soon as it is
+    /// known, without waiting for the colours, which take longer.
     private func refresh(after delay: Duration?) {
         generation += 1
         let generation = generation
@@ -287,16 +301,18 @@ final class CodeController: NSObject, NSTextViewDelegate, NSTextStorageDelegate,
             }
             // Copied once the typing has paused, not on every keystroke.
             guard let text = self?.textView.string else { return }
-            let (lines, spans) = await Task.detached(priority: .userInitiated) {
-                let lines = CodeController.countLines(text)
-                let spans = language == "text" ? [] : highlight(text: text, language: language)
-                return (lines, spans)
+            let lines = await Task.detached(priority: .userInitiated) {
+                CodeController.countLines(text)
+            }.value
+            guard let current = self, !Task.isCancelled, current.generation == generation else { return }
+            current.ruler.lineCount = lines
+            current.onLines?(lines)
+            let spans = language == "text" ? [] : await Task.detached(priority: .userInitiated) {
+                highlight(text: text, language: language)
             }.value
             guard let self, !Task.isCancelled, self.generation == generation else { return }
             self.spans = spans
             self.edits = []
-            self.ruler.lineCount = lines
-            self.onLines?(lines)
             if let storage = self.textView.textStorage, let layout = self.textView.layoutManager {
                 let all = NSRange(location: 0, length: storage.length)
                 // A temporary attribute over the whole text, so the layout
@@ -326,11 +342,14 @@ final class CodeController: NSObject, NSTextViewDelegate, NSTextStorageDelegate,
 
     // ----- edits -----------------------------------------------------------
 
+    /// An edit by the user, through the text view.
     func textDidChange(_ notification: Notification) {
         onEdit?()
-        refresh(after: .milliseconds(300))
     }
 
+    /// Every change of the characters, whoever makes it (typing, undo,
+    /// the find bar's Replace All, an Accessibility client setting the
+    /// value): the line count and the colours follow a moment later.
     nonisolated func textStorage(_ textStorage: NSTextStorage, didProcessEditing editedMask: NSTextStorageEditActions,
                                  range editedRange: NSRange, changeInLength delta: Int) {
         guard editedMask.contains(.editedCharacters) else { return }
@@ -338,6 +357,7 @@ final class CodeController: NSObject, NSTextViewDelegate, NSTextStorageDelegate,
         MainActor.assumeIsolated {
             edits.append(edit)
             ruler.textChanged(at: edit.at)
+            if !loading { refresh(after: .milliseconds(300)) }
         }
     }
 

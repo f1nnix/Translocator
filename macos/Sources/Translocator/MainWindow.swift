@@ -52,9 +52,13 @@ struct MainWindow: View {
 
     /// A side's file list, or the preview when quick look is on and the
     /// keyboard is on the other side.
-    @ViewBuilder
+    ///
+    /// The swap happens inside one container that stays the split view's
+    /// pane: with the condition at the top (a `Group` is no container),
+    /// the split view would be handed a new pane, sized to its minimum,
+    /// and the divider would jump.
     private func side(_ side: Side) -> some View {
-        Group {
+        ZStack {
             if let preview = store.snapshot.quickLook, preview.side == side {
                 QuickLookView(preview: preview)
             } else {

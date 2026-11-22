@@ -74,16 +74,26 @@ struct DialogView: View {
 struct DialogFrame<Content: View>: View {
     let title: String
     let width: CGFloat
+    /// Lets the dialog grow from `width` up to this to fit what it holds
+    /// at its ideal size (a row of buttons); nil keeps it at `width`.
+    var maxWidth: CGFloat?
     @ViewBuilder let content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        let stack = VStack(alignment: .leading, spacing: 14) {
             Text(title)
                 .font(.headline)
                 .accessibilityAddTraits(.isHeader)
             content
         }
-        .frame(width: width, alignment: .leading)
+        if let maxWidth {
+            // At the ideal width (a sheet would take the least), kept
+            // between the two.
+            stack.frame(minWidth: width, maxWidth: maxWidth, alignment: .leading)
+                .fixedSize(horizontal: true, vertical: false)
+        } else {
+            stack.frame(width: width, alignment: .leading)
+        }
     }
 }
 
@@ -222,8 +232,11 @@ struct ConflictDialog: View {
     @Environment(AppStore.self) private var store
 
     var body: some View {
-        DialogFrame(title: dialog.title, width: 600) {
-            Text(dialog.location).foregroundStyle(.secondary)
+        // As wide as the choices need on one row, from the GPUI shell's 600.
+        DialogFrame(title: dialog.title, width: 600, maxWidth: 760) {
+            Text(dialog.location)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 6) {
                 GridRow {
                     Text("Existing").foregroundStyle(.secondary)
@@ -241,8 +254,10 @@ struct ConflictDialog: View {
                 get: { dialog.applyAll },
                 set: { store.dialog(id, .applyAll(on: $0)) }
             ))
-            HStack {
-                Spacer()
+            // Six choices for folders, on one row; past the widest the
+            // dialog may be, they wrap rather than being cut short, the
+            // last (the default) always at the bottom right.
+            TrailingFlow(spacing: 8, lineSpacing: 8) {
                 ForEach(dialog.choices, id: \.self) { choice in
                     let button = Button(choice.label) { store.dialog(id, .choose(choice: choice.choice)) }
                     if choice.primary {
@@ -257,6 +272,61 @@ struct ConflictDialog: View {
         }
         .interactiveDismissDisabled()
         .onAppear { NSApp.activate() }
+    }
+}
+
+/// Lays its views out at their ideal sizes in rows pushed to the trailing
+/// edge, as a dialog's buttons are. What does not fit goes onto rows
+/// above, so the last views (the default button) stay together at the
+/// bottom right.
+struct TrailingFlow: Layout {
+    var spacing: CGFloat = 8
+    var lineSpacing: CGFloat = 8
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let rows = rows(subviews, width: proposal.width ?? .infinity)
+        let widest = rows.map(\.width).max() ?? 0
+        let height = rows.map(\.height).reduce(0, +) + lineSpacing * CGFloat(max(rows.count - 1, 0))
+        let width = proposal.width.flatMap { $0.isFinite ? $0 : nil } ?? widest
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var y = bounds.minY
+        for row in rows(subviews, width: bounds.width) {
+            var x = bounds.maxX - row.width
+            for ix in row.range {
+                let size = subviews[ix].sizeThatFits(.unspecified)
+                subviews[ix].place(at: CGPoint(x: x, y: y + (row.height - size.height) / 2),
+                                   proposal: ProposedViewSize(size))
+                x += size.width + spacing
+            }
+            y += row.height + lineSpacing
+        }
+    }
+
+    private struct Row {
+        var range: Range<Int>
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+    }
+
+    /// Filled from the last view back, then put in reading order.
+    private func rows(_ subviews: Subviews, width: CGFloat) -> [Row] {
+        var rows: [Row] = []
+        var current = Row(range: subviews.count..<subviews.count)
+        for ix in subviews.indices.reversed() {
+            let size = subviews[ix].sizeThatFits(.unspecified)
+            if !current.range.isEmpty, current.width + spacing + size.width > width {
+                rows.append(current)
+                current = Row(range: (ix + 1)..<(ix + 1))
+            }
+            current.width += (current.range.isEmpty ? 0 : spacing) + size.width
+            current.height = max(current.height, size.height)
+            current.range = ix..<current.range.upperBound
+        }
+        if !current.range.isEmpty { rows.append(current) }
+        return rows.reversed()
     }
 }
 

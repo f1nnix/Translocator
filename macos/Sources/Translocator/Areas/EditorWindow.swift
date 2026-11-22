@@ -43,7 +43,8 @@ struct EditorWindow: View {
                     palette: palette,
                     handle: handle,
                     onEdit: edited,
-                    onLines: { lines = $0 }
+                    onLines: { lines = $0 },
+                    takesFocus: true
                 )
                 Divider()
                 footer(editor)
@@ -100,15 +101,28 @@ struct EditorWindow: View {
             if editor.readonly { tag("read-only", .secondary) }
             if editor.dirty { tag("modified", .orange) }
             if !editor.readonly {
-                Button(editor.saveLabel, action: save)
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(!editor.canSave)
-                    .help(store.keys.label("save-file").map { "Save (\($0))" } ?? "Save")
+                saveButton(editor)
             }
         }
         .padding(.horizontal, 10)
         .frame(height: 34)
+    }
+
+    /// Save, as the GPUI shell has it: disabled unless the core says there
+    /// is something to save (`can_save`), and only then the prominent
+    /// button. A disabled `.borderedProminent` button keeps its accent fill
+    /// in a key window, so it would still look like the thing to press.
+    @ViewBuilder
+    private func saveButton(_ editor: EditorSnapshot) -> some View {
+        let button = Button(editor.saveLabel, action: save)
+            .controlSize(.small)
+            .disabled(!editor.canSave)
+            .help(store.keys.label("save-file").map { "Save (\($0))" } ?? "Save")
+        if editor.canSave {
+            button.buttonStyle(.borderedProminent)
+        } else {
+            button.buttonStyle(.bordered)
+        }
     }
 
     private func tag(_ label: String, _ color: Color) -> some View {

@@ -30,16 +30,18 @@ struct BookmarkEditDialog: View {
     var body: some View {
         DialogFrame(title: dialog.title, width: 560) {
             if dialog.isNew && dialog.plugins.count > 1 {
-                Picker("Type", selection: Binding(
-                    get: { dialog.plugin },
-                    set: { send(.plugin(dialog: id, plugin: $0)) }
-                )) {
-                    ForEach(dialog.plugins, id: \.id) { plugin in
-                        Text(plugin.name).tag(plugin.id)
-                    }
+                // Segments are all as wide as the longest name, so four
+                // long ones ("SSH (shell commands)") outgrow the sheet:
+                // then a pop-up menu, the same for every choice.
+                ViewThatFits(in: .horizontal) {
+                    typePicker
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+                        .fixedSize()
+                    typePicker
+                        .pickerStyle(.menu)
+                        .fixedSize()
                 }
-                .pickerStyle(.segmented)
-                .labelsHidden()
                 .accessibilityLabel("Connection type")
             }
             if !dialog.description.isEmpty {
@@ -93,6 +95,17 @@ struct BookmarkEditDialog: View {
             .padding(.top, 4)
         }
         .onAppear { focus = dialog.autofocus ?? "name" }
+    }
+
+    private var typePicker: some View {
+        Picker("Type:", selection: Binding(
+            get: { dialog.plugin },
+            set: { send(.plugin(dialog: id, plugin: $0)) }
+        )) {
+            ForEach(dialog.plugins, id: \.id) { plugin in
+                Text(plugin.name).tag(plugin.id)
+            }
+        }
     }
 
     // ----- one field ----------------------------------------------------------

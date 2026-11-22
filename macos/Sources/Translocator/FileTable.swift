@@ -155,6 +155,9 @@ final class FileTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDe
     private var cache: [Int: Row] = [:]
     private static let page = 64
     private var narrow = -1
+    /// Set while the table's selection is made to follow the core's cursor,
+    /// so that change is not taken for the user's.
+    private var mirroring = false
     private var keyObservers: [NSObjectProtocol] = []
 
     init(side: Side, store: AppStore) {
@@ -199,6 +202,10 @@ final class FileTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDe
         if old?.sortKey != next.sortKey || old?.sortDescending != next.sortDescending || old == nil {
             updateSortIndicator()
         }
+        // Reloading may drop or move the table's selection: that is the
+        // table's doing, not a choice to send back.
+        mirroring = true
+        defer { mirroring = false }
         if reload {
             cache.removeAll(keepingCapacity: true)
             table.reloadData()
@@ -206,10 +213,14 @@ final class FileTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDe
             redraw(rows: [Int(old.cursor), Int(next.cursor)])
         }
         let cursor = Int(next.cursor)
-        if cursor < Int(next.rowCount), reload || old?.cursor != next.cursor {
-            table.scrollRowToVisible(cursor)
-            // VoiceOver follows the selection; the cursor is drawn by the rows.
-            table.selectRowIndexes(IndexSet(integer: cursor), byExtendingSelection: false)
+        if cursor < Int(next.rowCount) {
+            let moved = reload || old?.cursor != next.cursor
+            if moved { table.scrollRowToVisible(cursor) }
+            // VoiceOver follows the selection; the cursor is drawn by the
+            // rows. Put back too when a choice of row was not taken.
+            if moved || table.selectedRow != cursor {
+                table.selectRowIndexes(IndexSet(integer: cursor), byExtendingSelection: false)
+            }
         }
     }
 
@@ -345,8 +356,20 @@ final class FileTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDe
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool {
-        // Only the cursor is mirrored as the selection, programmatically.
         true
+    }
+
+    /// The selection mirrors the cursor. Clicks and keys never reach the
+    /// table's own selection (the view takes them), so a change made by
+    /// anyone else — VoiceOver or another Accessibility client setting a
+    /// row's AXSelected — is a choice of row: it goes to the core as the
+    /// plain click it stands for, and the cursor comes back in the next
+    /// snapshot.
+    func tableViewSelectionDidChange(_ notification: Notification) {
+        guard !mirroring, let table, let pane else { return }
+        let row = table.selectedRow
+        guard row >= 0, row < Int(pane.rowCount), row != Int(pane.cursor) else { return }
+        store.pane(side, .click(row: UInt32(row), toggle: false, range: false))
     }
 
     // ----- drops --------------------------------------------------------------

@@ -26,9 +26,13 @@ struct TranslocatorApp: App {
         }
         .defaultSize(width: 960, height: 720)
 
+        // The scene's own "Settings…" item would open the window directly,
+        // with a fixed ⌘,: the app menu has the core's (AppCommands), with
+        // the user's key, and the core asks for the window.
         Settings {
             SettingsWindow().environment(store)
         }
+        .commandsRemoved()
     }
 }
 

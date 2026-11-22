@@ -138,8 +138,13 @@ struct JobProgress: View {
 }
 
 /// Every listed job, newest first, in the toolbar's popover (⌘J).
+///
+/// As narrow as Safari's downloads: the popover hangs centred under the
+/// Jobs button, which sits about 150 points from the window's right edge,
+/// so a wider one would stick out past the window.
 struct JobsList: View {
     @Environment(AppStore.self) private var store
+    static let width: CGFloat = 290
 
     var body: some View {
         let jobs = store.snapshot.jobs
@@ -148,6 +153,7 @@ struct JobsList: View {
             if jobs.isEmpty {
                 Text("No jobs yet. Copies, moves and deletions run here.")
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.vertical, 12)
             } else {
                 ScrollView {
@@ -164,11 +170,12 @@ struct JobsList: View {
                 HStack {
                     Spacer()
                     Button("Clear Finished") { store.send(.jobs(input: .clearFinished)) }
+                        .fixedSize()
                 }
             }
         }
         .padding(14)
-        .frame(width: 400)
+        .frame(width: Self.width, alignment: .leading)
     }
 }
 
@@ -180,8 +187,11 @@ struct JobRow: View {
         let running = job.state == .running
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text(job.title).lineLimit(1)
-                Spacer()
+                Text(job.title)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .help(job.title)
+                Spacer(minLength: 4)
                 if running {
                     Button {
                         store.send(.jobs(input: .cancel(job: job.id)))
@@ -207,6 +217,7 @@ struct JobRow: View {
             }
         }
         .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .combine)
     }
 
