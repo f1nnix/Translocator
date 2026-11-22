@@ -556,8 +556,17 @@ impl Rt {
         match result {
             Ok(stop) => stop,
             Err(_) => {
-                log::error!("the runtime caught a panic while handling a message");
                 self.effects.clear();
+                // A panic inside the core's update poisons the lock its
+                // model sits behind, and every later event would panic the
+                // same way: the window would stay up but do nothing, not even
+                // quit. Nothing can bring the model back, so the app ends
+                // here, leaving a crash report, rather than hang like that.
+                if catch_unwind(AssertUnwindSafe(|| drop(self.core.view()))).is_err() {
+                    log::error!("the core panicked while updating and its model is lost; ending the app");
+                    std::process::abort();
+                }
+                log::error!("the runtime caught a panic while handling a message");
                 None
             }
         }
