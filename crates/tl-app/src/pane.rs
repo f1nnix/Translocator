@@ -468,30 +468,39 @@ pub fn build_order(
     } else {
         visible.into_iter().filter(|ix| matches_filter(&names[*ix as usize], query)).collect()
     };
-    order.sort_by(|&a, &b| {
-        let (ea, eb) = (&entries[a as usize], &entries[b as usize]);
-        let (ad, bd) = (ea.is_dir(), eb.is_dir());
-        if folders_first && ad != bd {
-            return bd.cmp(&ad);
-        }
-        let by_name = || natural_cmp(&names[a as usize], &names[b as usize]).then_with(|| ea.name.cmp(&eb.name));
-        let ord = match sort.key {
-            SortKey::Name => by_name(),
-            SortKey::Ext => ea
-                .extension()
-                .map(|e| e.to_ascii_lowercase())
-                .cmp(&eb.extension().map(|e| e.to_ascii_lowercase()))
-                .then_with(by_name),
-            SortKey::Size if ad => by_name(),
-            SortKey::Size => ea.size.cmp(&eb.size).then_with(by_name),
-            SortKey::Modified => ea.mtime.cmp(&eb.mtime).then_with(by_name),
-        };
-        if sort.desc { ord.reverse() } else { ord }
-    });
+    order.sort_by(|&a, &b| compare(listing, sort, folders_first, a as usize, b as usize));
     if !at_root {
         order.insert(0, PARENT);
     }
     (order, unfiltered)
+}
+
+/// How two entries of a listing are ordered. This has to be a total order
+/// (the standard sort panics on one that is not), so every key falls back
+/// to the name and then the raw bytes, and a folder, which has no size,
+/// counts as smaller than any file when sorting by size.
+fn compare(listing: &Listing, sort: Sort, folders_first: bool, a: usize, b: usize) -> Ordering {
+    let (entries, names) = (&listing.entries, &listing.names);
+    let (ea, eb) = (&entries[a], &entries[b]);
+    let (ad, bd) = (ea.is_dir(), eb.is_dir());
+    if folders_first && ad != bd {
+        return bd.cmp(&ad);
+    }
+    let by_name = || natural_cmp(&names[a], &names[b]).then_with(|| ea.name.cmp(&eb.name));
+    let ord = match sort.key {
+        SortKey::Name => by_name(),
+        SortKey::Ext => ea
+            .extension()
+            .map(|e| e.to_ascii_lowercase())
+            .cmp(&eb.extension().map(|e| e.to_ascii_lowercase()))
+            .then_with(by_name),
+        SortKey::Size => {
+            let size = |e: &Entry| (!e.is_dir()).then_some(e.size);
+            size(ea).cmp(&size(eb)).then_with(by_name)
+        }
+        SortKey::Modified => ea.mtime.cmp(&eb.mtime).then_with(by_name),
+    };
+    if sort.desc { ord.reverse() } else { ord }
 }
 
 /// Rebuilds what tab `tab` shows, keeping the cursor on `select`, or else
@@ -1379,6 +1388,72 @@ pub fn elevate(model: &mut Model, tab: TabId, out: &mut Out) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every sort is a total order, whatever the names, sizes and dates,
+    /// with folders first or not: the standard sort panics on one that is
+    /// not, and a panic in the core leaves the app unable to do anything.
+    #[test]
+    fn every_sort_is_a_total_order() {
+        use tl_model::EntryKind;
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % n
+        };
+        let parts = ["a", "B", "file", "File", "1", "01", "10", "9", ".", "-", "_", "x.tar", ".gz", "é", "Ё", "z"];
+        for round in 0..20 {
+            let entries: Vec<Entry> = (0..28)
+                .map(|i| {
+                    let name: String = (0..1 + next(4)).map(|_| parts[next(parts.len() as u64) as usize]).collect();
+                    let kind = if next(3) == 0 { EntryKind::Dir } else { EntryKind::File };
+                    let mut e = Entry::new(format!("{name}{}", i % 3).into_bytes(), kind);
+                    e.size = [0, 1, 1024, 1 << 30][next(4) as usize];
+                    e.mtime = [None, Some(1), Some(2)][next(3) as usize];
+                    e
+                })
+                .collect();
+            let listing = Listing::new(entries);
+            let n = listing.entries.len();
+            for key in [SortKey::Name, SortKey::Ext, SortKey::Size, SortKey::Modified] {
+                for desc in [false, true] {
+                    for folders_first in [false, true] {
+                        let sort = Sort { key, desc };
+                        let cmp = |a, b| compare(&listing, sort, folders_first, a, b);
+                        for a in 0..n {
+                            for b in 0..n {
+                                assert_eq!(cmp(a, b), cmp(b, a).reverse(), "round {round} {sort:?} {folders_first}");
+                                for c in 0..n {
+                                    if cmp(a, b).is_le() && cmp(b, c).is_le() {
+                                        assert!(cmp(a, c).is_le(), "round {round} {sort:?} {folders_first}: {a} {b} {c}");
+                                    }
+                                }
+                            }
+                        }
+                        build_order(&listing, sort, folders_first, true, false, "");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn folders_count_as_smallest_when_sorting_by_size() {
+        use tl_model::EntryKind;
+        let file = |name: &str, size| {
+            let mut e = Entry::new(name.as_bytes().to_vec(), EntryKind::File);
+            e.size = size;
+            e
+        };
+        let listing = Listing::new(vec![file("big", 900), Entry::new(b"dir".to_vec(), EntryKind::Dir), file("small", 5)]);
+        let names = |desc| {
+            let (order, _) = build_order(&listing, Sort { key: SortKey::Size, desc }, false, true, true, "");
+            order.iter().map(|ix| listing.names[*ix as usize].clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(names(false), ["dir", "small", "big"]);
+        assert_eq!(names(true), ["big", "small", "dir"]);
+    }
 
     #[test]
     fn natural_order() {
