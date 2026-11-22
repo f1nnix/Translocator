@@ -45,7 +45,7 @@ cargo build --release -p translocator
 ```
 
 ```bash
-scripts/bundle.sh --release             # macOS → target/release/Translocator.app
+macos/bundle.sh --release               # macOS (native SwiftUI app) → target/Translocator.app
 ```
 
 ## 📄 License

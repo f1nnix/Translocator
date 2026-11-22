@@ -40,8 +40,8 @@ env:
 
 jobs:
   app:
-    name: macOS 15 · app
-    runs-on: macos-15
+    name: macOS 26 · app
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
@@ -53,7 +53,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: macos-15
+          key: macos-26
 
       # The S3, WebDAV and SSH suites talk to containers that only the Linux
       # job starts; without their variables in the environment they skip.
@@ -114,19 +114,14 @@ jobs:
           echo "MACOS_IDENTITY=$identity" >> "$GITHUB_ENV"
           echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
 
-      # Both architectures for a release; a check of main or a pull request
-      # only needs this runner's own, and macOS minutes are not free.
+      # The native app: the Rust core as an XCFramework, then the SwiftUI
+      # package, both architectures, signed with the Developer ID when the
+      # secrets are there.
       - name: Build the app
-        env:
-          RELEASING: ${{ startsWith(github.ref, 'refs/tags/v') }}
         run: |
-          if [ "$RELEASING" = true ]; then
-            scripts/bundle.sh --release --universal
-          else
-            scripts/bundle.sh --release
-          fi
-          lipo -archs target/release/Translocator.app/Contents/MacOS/translocator
-          codesign -dv --verbose=2 target/release/Translocator.app
+          macos/bundle.sh --release
+          lipo -archs target/Translocator.app/Contents/MacOS/Translocator
+          codesign -dv --verbose=2 target/Translocator.app
 
       - name: Pack a .dmg
         run: |
@@ -134,7 +129,7 @@ jobs:
           staging="$RUNNER_TEMP/dmg"
           rm -rf "$staging"
           mkdir -p "$staging" dist
-          cp -R target/release/Translocator.app "$staging/"
+          cp -R target/Translocator.app "$staging/"
           # The drag-to-install window everyone expects.
           ln -s /Applications "$staging/Applications"
           dmg="dist/Translocator-$version.dmg"
