@@ -1,8 +1,8 @@
 # The Linux development environment for the GTK app (crates/translocator-gtk)
 # and the rest of the workspace: Ubuntu 24.04 (GTK 4.14, libadwaita 1.5,
-# GNOME 46), the packages CI installs, Rust stable, and what `dev.sh run`
-# needs to start the app headless and take screenshots (Xvfb, D-Bus,
-# xdotool, ImageMagick). Built and used by linux/dev.sh; the source is
+# GtkSourceView 5.12, GNOME 46), the packages CI installs, Rust stable, and
+# what `dev.sh run` needs to start the app headless and take screenshots
+# (Xvfb, D-Bus, xdotool, ImageMagick). Built and used by linux/dev.sh; the source is
 # mounted at /src, the cargo registry and target dir live in named volumes.
 FROM ubuntu:24.04
 

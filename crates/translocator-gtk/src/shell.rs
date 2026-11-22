@@ -441,6 +441,7 @@ impl Shell {
             for pane in &self.panes {
                 pane.list.set_general(general.row_height, general.show_icons);
             }
+            crate::areas::settings::update(&next.settings, &self.keys.borrow());
         }
         if initial || old.title != next.title {
             self.window.set_title(Some(&next.title));

@@ -26,5 +26,7 @@ log.workspace = true
 # GTK 4.14 and libadwaita 1.5: GNOME 46, Ubuntu 24.04.
 gtk = { package = "gtk4", version = "0.11", features = ["gnome_46"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
+# GtkSourceView 5 for the viewer, the editor and quick look.
+sourceview5 = "0.11"
 async-channel = "2"
 serde_json.workspace = true

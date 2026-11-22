@@ -96,6 +96,8 @@ impl Theme {
         } else {
             &settings.appearance.light
         };
+        // The viewer, the editor and quick look paint their own text.
+        crate::areas::code::set_content_theme(name, manager.is_dark());
         let general = &settings.general;
         let mut css = format!(
             ".tl-list {{ font-size: {}px; }}\n.tl-cell {{ min-height: {}px; }}\n",
@@ -150,7 +152,7 @@ textview.tl-console, textview.tl-console text, scrolledwindow.tl-console {{ back
 }
 
 /// `#rrggbb` as it is, `#rrggbbaa` as `rgba()`, which every GTK reads.
-fn color(hex: &str) -> String {
+pub(crate) fn color(hex: &str) -> String {
     let digits = hex.trim_start_matches('#');
     let byte = |i: usize| u8::from_str_radix(digits.get(i..i + 2).unwrap_or("00"), 16).unwrap_or(0);
     if digits.len() == 8 {
