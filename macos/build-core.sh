@@ -70,6 +70,8 @@ cargo run -q -p tl-ffi --target aarch64-apple-darwin --features cli --bin uniffi
   --module-name TLCoreFFI --modulemap-filename module.modulemap
 rm -rf "$meta"
 
+# The folder holds only this generated file, so a fresh checkout has none.
+mkdir -p macos/Sources/TLCore
 cp "$bindings/TLCore.swift" macos/Sources/TLCore/TLCore.swift
 
 headers="$build/include"
