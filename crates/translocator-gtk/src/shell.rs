@@ -37,9 +37,9 @@ use crate::menus::{self, MenuActions};
 use crate::pane::PaneView;
 use crate::theme::Theme;
 
-/// The application id: reverse DNS for the desktop file, D-Bus and the
-/// icon (`packaging/dev.translocator.Translocator.desktop` once the GTK
-/// app is what the packages ship).
+/// The application id: reverse DNS for D-Bus, the desktop file
+/// (`packaging/dev.translocator.Translocator.desktop`), the AppStream
+/// metadata and the icon the packages install.
 pub const APP_ID: &str = "dev.translocator.Translocator";
 
 const SIDES: [Side; 2] = [Side::Left, Side::Right];
@@ -158,25 +158,22 @@ pub fn pane_key(
     glib::Propagation::Proceed
 }
 
-/// A menu or popover closed: the keyboard goes back to the active pane's
-/// list, unless something that takes text has it. (GTK gives it to the
-/// button that opened the menu, where no file command would reach.)
+/// A dialog, menu or popover closed: the keyboard goes back to the active
+/// pane's list, unless something that takes text outside the closed
+/// dialog has it (the command line, say, which the core may ask for).
+///
+/// Neither GTK nor libadwaita gets this right on its own. A popover gives
+/// the keyboard to the button that opened it. A dialog gives it back to
+/// the widget that had it when the dialog opened, which for a file list is
+/// a row widget; when the dialog changed the listing (Go to Folder, New
+/// Folder, Delete) that row is gone, so the keyboard stays on the dialog's
+/// field while the dialog fades out, and when the dialog is taken away
+/// GTK moves it to the first focusable widget in the window, the pane's
+/// "Local" locations button. Either way the next keys never reach a list.
 pub fn restore_focus_soon() {
     glib::idle_add_local_once(|| {
-        let Some(shell) = try_shell() else { return };
-        let focus = gtk::prelude::GtkWindowExt::focus(&shell.window);
-        let lost = match &focus {
-            None => true,
-            Some(f) => {
-                f.is::<gtk::Button>()
-                    || f.is::<gtk::MenuButton>()
-                    || f.ancestor(gtk::MenuButton::static_type()).is_some()
-                    || f.ancestor(adw::HeaderBar::static_type()).is_some()
-            }
-        };
-        if lost && shell.snapshot.borrow().dialogs.is_empty() {
-            let active = shell.snapshot.borrow().active;
-            shell.panes[ix(active)].list.grab_focus();
+        if let Some(shell) = try_shell() {
+            shell.restore_focus();
         }
     });
 }
@@ -237,6 +234,10 @@ pub struct Shell {
 }
 
 pub fn run() -> i32 {
+    // The X11 WM_CLASS is the program name: make it the application id
+    // too, as the desktop file's StartupWMClass says (Wayland's app_id
+    // already is).
+    glib::set_prgname(Some(APP_ID));
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_startup(|_| gtk::Window::set_default_icon_name(APP_ID));
     app.connect_activate(|app| match try_shell() {
@@ -509,6 +510,32 @@ impl Shell {
         if next.settings_requests != self.seen.borrow().settings {
             self.seen.borrow_mut().settings = next.settings_requests;
             crate::areas::settings::present(next, &self.window);
+        }
+    }
+
+    /// See [`restore_focus_soon`].
+    fn restore_focus(&self) {
+        // A dialog still up (or one the core is about to show) keeps it.
+        if self.window.visible_dialog().is_some() || !self.snapshot.borrow().dialogs.is_empty() {
+            return;
+        }
+        let focus = gtk::prelude::GtkWindowExt::focus(&self.window);
+        let lost = match &focus {
+            None => true,
+            // A menu that is open (another one, opened since) keeps it.
+            Some(f) if f.ancestor(gtk::Popover::static_type()).is_some_and(|p| p.is_visible()) => false,
+            Some(f) => {
+                // A dialog that is no longer visible is one fading out.
+                f.ancestor(adw::Dialog::static_type()).is_some()
+                    || f.is::<gtk::Button>()
+                    || f.ancestor(gtk::MenuButton::static_type()).is_some()
+                    || f.ancestor(adw::HeaderBar::static_type()).is_some()
+                    || !f.is_mapped()
+            }
+        };
+        if lost {
+            let active = self.snapshot.borrow().active;
+            self.panes[ix(active)].list.grab_focus();
         }
     }
 

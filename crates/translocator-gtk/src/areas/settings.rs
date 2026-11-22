@@ -62,6 +62,8 @@ pub fn present(snapshot: &Snapshot, parent: &impl IsA<gtk::Widget>) {
             }
         }
         OPEN.with(|o| o.replace(None));
+        // The keyboard back to the list, not to the first button.
+        shell::restore_focus_soon();
     });
     prefs.dialog.present(Some(parent));
     OPEN.with(|o| o.replace(Some(prefs)));
