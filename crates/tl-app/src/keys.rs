@@ -213,12 +213,36 @@ pub fn conflicts(keys: &str, with: &CommandSpec, overrides: &BTreeMap<String, Ve
 /// Whether two bindings are the same keys, however their modifiers are
 /// ordered (`cmd-shift-g` and `shift-cmd-g` are one binding).
 pub fn same_keys(a: &str, b: &str) -> bool {
+    same_keys_on(a, b, Platform::Mac)
+}
+
+/// [`same_keys`] as `platform` presses them: on Linux `cmd-a` and `ctrl-a`
+/// are the same keys.
+pub fn same_keys_on(a: &str, b: &str, platform: Platform) -> bool {
     let canonical = |keys: &str| -> Vec<String> {
         keys.split_whitespace()
-            .map(|part| Keystroke::parse(part).map(|s| s.unparse()).unwrap_or_else(|| part.to_string()))
+            .map(|part| {
+                Keystroke::parse(part)
+                    .map(|s| platform.effective(s).unparse())
+                    .unwrap_or_else(|| part.to_string())
+            })
             .collect()
     };
     canonical(a) == canonical(b)
+}
+
+/// [`conflicts`] as `platform` presses keys.
+pub fn conflicts_on(
+    keys: &str,
+    with: &CommandSpec,
+    overrides: &BTreeMap<String, Vec<String>>,
+    platform: Platform,
+) -> Vec<&'static CommandSpec> {
+    COMMANDS
+        .iter()
+        .filter(|other| other.id != with.id && other.context == with.context)
+        .filter(|other| other.keys(overrides).iter().any(|k| same_keys_on(k, keys, platform)))
+        .collect()
 }
 
 /// The first key of a command, as a label.
@@ -232,8 +256,25 @@ pub fn shortcut(id: &str, overrides: &BTreeMap<String, Vec<String>>, platform: P
 pub enum Platform {
     /// `⌃⌥⇧⌘` symbols.
     Mac,
-    /// `Ctrl+Alt+Shift+Super+`.
+    /// `Ctrl+Alt+Shift+Super+`, `cmd` meaning Super.
     Other,
+    /// GNOME and KDE: `cmd` in a binding is the primary modifier, Ctrl
+    /// (Super belongs to the desktop), written `Ctrl+Alt+Shift+`.
+    Linux,
+}
+
+impl Platform {
+    /// A keystroke as this platform presses it: on Linux, `cmd` is Ctrl.
+    pub fn effective(self, stroke: Keystroke) -> Keystroke {
+        match self {
+            Platform::Linux if stroke.platform => Keystroke {
+                platform: false,
+                control: true,
+                ..stroke
+            },
+            _ => stroke,
+        }
+    }
 }
 
 /// One keystroke of a binding.
@@ -333,6 +374,7 @@ fn pretty_one(keys: &str, platform: Platform) -> String {
     let Some(stroke) = Keystroke::parse(keys) else {
         return keys.to_string();
     };
+    let stroke = platform.effective(stroke);
     let mut out = String::new();
     let mods = [
         (stroke.control, "⌃", "Ctrl"),
@@ -344,7 +386,7 @@ fn pretty_one(keys: &str, platform: Platform) -> String {
         if on {
             match platform {
                 Platform::Mac => out.push_str(symbol),
-                Platform::Other => {
+                Platform::Other | Platform::Linux => {
                     out.push_str(name);
                     out.push('+');
                 }
@@ -426,6 +468,21 @@ mod tests {
         let go_to = command("go-to-path").unwrap();
         let none = BTreeMap::new();
         assert!(conflicts("shift-cmd-h", go_to, &none).iter().any(|c| c.id == "go-home"));
+    }
+
+    #[test]
+    fn on_linux_cmd_is_ctrl_and_no_default_clashes() {
+        assert_eq!(pretty("cmd-shift-g", Platform::Linux), "Ctrl+Shift+G");
+        assert_eq!(pretty("cmd-q", Platform::Other), "Super+Q");
+        assert!(same_keys_on("cmd-a", "ctrl-a", Platform::Linux));
+        assert!(!same_keys_on("cmd-a", "ctrl-a", Platform::Mac));
+        let none = BTreeMap::new();
+        for c in COMMANDS {
+            for keys in c.defaults {
+                let clash: Vec<&str> = conflicts_on(keys, c, &none, Platform::Linux).iter().map(|o| o.id).collect();
+                assert!(clash.is_empty(), "{} {keys} clashes on Linux with {clash:?}", c.id);
+            }
+        }
     }
 
     #[test]
