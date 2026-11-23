@@ -9,7 +9,6 @@
 //! `TL_SSH_TEST_*` server of the other end-to-end tests.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -58,12 +57,27 @@ fn connect(bookmark: &Bookmark, runtime: &Path) -> Arc<tl_ssh::SshVfs> {
     tl_ssh::connect(bookmark, &env, &CancelToken::new()).expect("connect")
 }
 
+/// Writes an executable script. A child process does the writing: if this
+/// process held the file open for writing, a process another test forks at
+/// that moment would inherit the descriptor, and running the script would
+/// then fail with "text file busy" on Linux.
+fn write_script(path: &Path, content: &str) {
+    use std::io::Write;
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(content.as_bytes()).unwrap();
+    assert!(child.wait().unwrap().success());
+}
+
 fn servers() -> Vec<Server> {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     let ssh = root.join("fake-ssh");
-    fs::write(&ssh, FAKE_SSH).unwrap();
-    fs::set_permissions(&ssh, fs::Permissions::from_mode(0o755)).unwrap();
+    write_script(&ssh, FAKE_SSH);
     let mut bookmark = Bookmark::new("fake", "ssh");
     bookmark.set("host", "fakehost");
     bookmark.set("ssh_bin", ssh.display().to_string());

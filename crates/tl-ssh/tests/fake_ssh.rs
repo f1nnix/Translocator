@@ -51,12 +51,27 @@ echo "sudo: $tries incorrect password attempts" >&2
 exit 1
 "#;
 
+/// Writes an executable script. A child process does the writing: if this
+/// process held the file open for writing, a process another test forks at
+/// that moment would inherit the descriptor, and running the script would
+/// then fail with "text file busy" on Linux.
+fn write_script(path: &Path, content: &str) {
+    use std::io::Write;
+    let mut child = std::process::Command::new("/bin/sh")
+        .args(["-c", "cat > \"$1\" && chmod 755 \"$1\"", "sh"])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(content.as_bytes()).unwrap();
+    assert!(child.wait().unwrap().success());
+}
+
 /// A stand-in for OpenSSH covering the options the provider uses.
 fn fake_ssh(dir: &Path, path_prefix: &str) -> PathBuf {
     let bin = dir.join("fakebin");
     fs::create_dir(&bin).unwrap();
-    fs::write(bin.join("sudo"), FAKE_SUDO).unwrap();
-    fs::set_permissions(bin.join("sudo"), fs::Permissions::from_mode(0o755)).unwrap();
+    write_script(&bin.join("sudo"), FAKE_SUDO);
     let bin = bin.display();
     let script = format!(
         r#"#!/bin/sh
@@ -87,8 +102,7 @@ exec /bin/sh -c "$*"
 "#
     );
     let path = dir.join("fake-ssh");
-    fs::write(&path, script).unwrap();
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    write_script(&path, &script);
     path
 }
 
