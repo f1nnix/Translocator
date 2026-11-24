@@ -1,35 +1,53 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
   <title>Translocator</title>
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#3b82f6"/>
-      <stop offset="1" stop-color="#1e3a8a"/>
+    <!-- Two panes, each a half of the tile: the local side in indigo, the
+         remote side in teal, both deepening towards the bottom. -->
+    <linearGradient id="left" x1="0.1" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#9A8CFF"/>
+      <stop offset="0.5" stop-color="#5B4FE8"/>
+      <stop offset="1" stop-color="#241C6E"/>
     </linearGradient>
+    <linearGradient id="right" x1="0.4" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#6FF0DC"/>
+      <stop offset="0.5" stop-color="#14A8C8"/>
+      <stop offset="1" stop-color="#0B3F66"/>
+    </linearGradient>
+    <radialGradient id="shine" cx="0.25" cy="0.05" r="0.8">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.3"/>
+      <stop offset="0.6" stop-color="#ffffff" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.5"/>
+      <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.06"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.2"/>
+    </linearGradient>
+    <linearGradient id="seam" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0.15"/>
+    </linearGradient>
+
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="22"/>
+      <feOffset dy="22"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.4"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <clipPath id="tileClip">
+      <rect x="100" y="100" width="824" height="824" rx="186"/>
+    </clipPath>
   </defs>
 
-  <!-- App tile -->
-  <rect x="8" y="8" width="112" height="112" rx="26" fill="url(#bg)"/>
-
-  <!-- Left pane: header bar plus file rows -->
-  <g>
-    <rect x="20" y="34" width="32" height="60" rx="5" fill="#ffffff" opacity="0.95"/>
-    <rect x="20" y="34" width="32" height="10" rx="5" fill="#0f172a" opacity="0.28"/>
-    <rect x="25" y="51" width="22" height="3.5" rx="1.75" fill="#1e3a8a" opacity="0.75"/>
-    <rect x="25" y="60" width="22" height="3.5" rx="1.75" fill="#1e3a8a" opacity="0.55"/>
-    <rect x="25" y="69" width="22" height="3.5" rx="1.75" fill="#1e3a8a" opacity="0.55"/>
-    <rect x="25" y="78" width="14" height="3.5" rx="1.75" fill="#1e3a8a" opacity="0.4"/>
+  <!-- Tile, inside Apple's 824 pt grid on a 1024 pt canvas. -->
+  <g filter="url(#shadow)">
+    <rect x="100" y="100" width="824" height="824" rx="186" fill="#241C6E"/>
   </g>
-
-  <!-- Right pane: the remote side, marked by a selected row -->
-  <g>
-    <rect x="76" y="34" width="32" height="60" rx="5" fill="#ffffff" opacity="0.95"/>
-    <rect x="76" y="34" width="32" height="10" rx="5" fill="#0f172a" opacity="0.28"/>
-    <rect x="81" y="51" width="22" height="3.5" rx="1.75" fill="#1e3a8a" opacity="0.55"/>
-    <rect x="81" y="60" width="22" height="3.5" rx="1.75" fill="#22c55e" opacity="0.95"/>
-    <rect x="81" y="69" width="22" height="3.5" rx="1.75" fill="#1e3a8a" opacity="0.55"/>
-    <rect x="81" y="78" width="14" height="3.5" rx="1.75" fill="#1e3a8a" opacity="0.4"/>
+  <g clip-path="url(#tileClip)">
+    <rect x="100" y="100" width="412" height="824" fill="url(#left)"/>
+    <rect x="512" y="100" width="412" height="824" fill="url(#right)"/>
+    <rect x="100" y="100" width="824" height="824" fill="url(#shine)"/>
+    <!-- The line between the panes. -->
+    <rect x="509" y="100" width="6" height="824" fill="url(#seam)"/>
   </g>
-
-  <!-- Transfer arrow between the panes -->
-  <path d="M55 60 L64 60 L64 54 L73 64 L64 74 L64 68 L55 68 Z" fill="#ffffff"/>
+  <rect x="102" y="102" width="820" height="820" rx="184" fill="none" stroke="url(#rim)" stroke-width="4"/>
 </svg>
