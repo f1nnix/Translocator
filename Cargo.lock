@@ -8505,7 +8505,7 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tl-app"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "crux_core",
  "serde",
@@ -8515,7 +8515,7 @@ dependencies = [
 
 [[package]]
 name = "tl-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "dirs 6.0.0",
  "libc",
@@ -8533,7 +8533,7 @@ dependencies = [
 
 [[package]]
 name = "tl-ffi"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "env_logger",
@@ -8568,7 +8568,7 @@ dependencies = [
 
 [[package]]
 name = "tl-local"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "filetime",
  "flate2",
@@ -8584,7 +8584,7 @@ dependencies = [
 
 [[package]]
 name = "tl-model"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "regex",
  "serde",
@@ -8595,7 +8595,7 @@ dependencies = [
 
 [[package]]
 name = "tl-runtime"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "crux_core",
  "dirs 6.0.0",
@@ -8616,7 +8616,7 @@ dependencies = [
 
 [[package]]
 name = "tl-s3"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aws-config",
  "aws-credential-types",
@@ -8635,7 +8635,7 @@ dependencies = [
 
 [[package]]
 name = "tl-ssh"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "libc",
@@ -8649,11 +8649,11 @@ dependencies = [
 
 [[package]]
 name = "tl-themes"
-version = "0.3.0"
+version = "0.4.0"
 
 [[package]]
 name = "tl-webdav"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -8890,7 +8890,7 @@ dependencies = [
 
 [[package]]
 name = "translocator"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "env_logger",
@@ -8910,7 +8910,7 @@ dependencies = [
 
 [[package]]
 name = "translocator-gtk"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "async-channel",
  "gtk4",

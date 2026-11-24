@@ -68,6 +68,11 @@
   <content_rating type="oars-1.1"/>
 
   <releases>
+    <release version="0.4.0" date="2026-11-24">
+      <description>
+        <p>A pane can show its files as a list, in columns or as icons. Quick look previews PDFs page by page. A new app icon.</p>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-11-22">
       <description>
         <p>The Linux packages now ship the GTK 4 and libadwaita app.</p>
