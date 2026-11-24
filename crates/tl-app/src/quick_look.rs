@@ -4,8 +4,8 @@
 //! — moving, marking and walking into folders all behave as they always do
 //! — and the preview follows the cursor of the active pane: text (with its
 //! language, for the shell to colour), images (as bytes and a format, for
-//! the shell to decode), and for everything else what the listing already
-//! knows.
+//! the shell to decode), PDFs (as bytes, for the shell to lay out page by
+//! page), and for everything else what the listing already knows.
 //!
 //! The cursor moves faster than a file can be read, above all over a
 //! connection, so a read starts only once the cursor has sat still for
@@ -34,6 +34,9 @@ pub const TEXT_LIMIT: u64 = 256 * 1024;
 /// An image larger than this is named rather than fetched; a preview is not
 /// worth pulling tens of megabytes over a connection.
 pub const IMAGE_LIMIT: u64 = 8 * 1024 * 1024;
+/// The same for a PDF: documents run larger than pictures, and a whole one
+/// is needed to draw even its first page.
+pub const PDF_LIMIT: u64 = 32 * 1024 * 1024;
 /// A NUL in this much of the beginning means the file is not text.
 const SNIFF: usize = 8 * 1024;
 
@@ -106,12 +109,18 @@ pub fn image_format(name: &[u8]) -> Option<ImageFormat> {
     }
 }
 
+/// Whether the name ends in `.pdf`, in any case.
+pub fn is_pdf(name: &[u8]) -> bool {
+    tl_model::entry::split_extension(name).1.is_some_and(|ext| ext.eq_ignore_ascii_case(b"pdf"))
+}
+
 /// What is worth reading, decided from the listing alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Plan {
     /// Nothing to read: the listing already says all there is to say.
     Note(&'static str),
     Image(ImageFormat),
+    Pdf,
     Text,
 }
 
@@ -125,6 +134,13 @@ fn plan_for(entry: &Entry) -> Plan {
         Some(EntryKind::File) => {
             if entry.size == 0 {
                 return Plan::Note("Empty file");
+            }
+            if is_pdf(&entry.name) {
+                return if entry.size > PDF_LIMIT {
+                    Plan::Note("PDF too large to preview")
+                } else {
+                    Plan::Pdf
+                };
             }
             match image_format(&entry.name) {
                 Some(_) if entry.size > IMAGE_LIMIT => Plan::Note("Image too large to preview"),
@@ -145,6 +161,8 @@ pub enum Body {
     Note(String),
     /// Bytes for the shell to decode.
     Image { format: ImageFormat, bytes: Arc<Vec<u8>> },
+    /// A whole PDF for the shell to draw, every page in a column.
+    Pdf { bytes: Arc<Vec<u8>> },
     /// Read-only text with line numbers and no soft wrap.
     Text {
         text: Arc<str>,
@@ -158,14 +176,14 @@ pub enum Body {
 
 impl Body {
     /// The line drawn in the middle of the preview, and whether it is an
-    /// error; `None` for an image or text.
+    /// error; `None` for an image, a PDF or text.
     pub fn message(&self) -> Option<(&str, bool)> {
         match self {
             Body::Nothing => Some(("Nothing to preview", false)),
             Body::Reading => Some(("Reading…", false)),
             Body::Note(note) => Some((note, false)),
             Body::Error(err) => Some((err, true)),
-            Body::Image { .. } | Body::Text { .. } => None,
+            Body::Image { .. } | Body::Pdf { .. } | Body::Text { .. } => None,
         }
     }
 }
@@ -261,6 +279,7 @@ pub fn reply(model: &mut Model, reply: QuickLookReply, out: &mut Out) {
             let Some(target) = ql.showing.clone() else { return };
             let limit = match plan_for(&target.entry) {
                 Plan::Image(_) => IMAGE_LIMIT,
+                Plan::Pdf => PDF_LIMIT,
                 Plan::Text => TEXT_LIMIT,
                 Plan::Note(_) => return,
             };
@@ -290,11 +309,15 @@ fn loaded(target: &Target, result: VfsResult<(Vec<u8>, u64)>) -> Body {
         Ok((bytes, _)) => bytes,
         Err(err) => return Body::Error(err.to_string()),
     };
-    if let Plan::Image(format) = plan_for(&target.entry) {
-        return Body::Image {
-            format,
-            bytes: Arc::new(bytes),
-        };
+    match plan_for(&target.entry) {
+        Plan::Image(format) => {
+            return Body::Image {
+                format,
+                bytes: Arc::new(bytes),
+            };
+        }
+        Plan::Pdf => return Body::Pdf { bytes: Arc::new(bytes) },
+        Plan::Note(_) | Plan::Text => {}
     }
     if bytes.iter().take(SNIFF).any(|byte| *byte == 0) {
         return Body::Note("Binary file".into());
@@ -506,6 +529,10 @@ mod tests {
         assert_eq!(plan_for(&file("a.txt", 1)), Plan::Text);
         assert_eq!(plan_for(&file("a.PNG", 1)), Plan::Image(ImageFormat::Png));
         assert_eq!(plan_for(&file("a.png", IMAGE_LIMIT + 1)), Plan::Note("Image too large to preview"));
+        assert_eq!(plan_for(&file("Paper.PDF", 1)), Plan::Pdf);
+        assert_eq!(plan_for(&file("a.pdf", PDF_LIMIT)), Plan::Pdf);
+        assert_eq!(plan_for(&file("a.pdf", PDF_LIMIT + 1)), Plan::Note("PDF too large to preview"));
+        assert_eq!(plan_for(&file("pdf", 1)), Plan::Text);
         assert_eq!(plan_for(&Entry::new("fifo", EntryKind::Fifo)), Plan::Note("Not a regular file"));
         assert_eq!(plan_for(&Entry::new("gone", EntryKind::Symlink)), Plan::Note("Broken link"));
         let mut link = Entry::new("link", EntryKind::Symlink);
@@ -620,6 +647,24 @@ mod tests {
         );
         h.key(Key::CursorDown);
         assert_eq!(h.body(), Body::Note("Empty file".into()));
+    }
+
+    #[test]
+    fn quick_look_reads_a_pdf_whole() {
+        let mut h = Harness::new();
+        h.list(Side::Left, "/d", vec![file("paper.pdf", 8)], 1);
+        let effects = h.key(Key::ToggleQuickLook);
+        // A NUL in the bytes does not make it a "binary file".
+        let op = settle_and_read(&mut h, effects, b"%PDF-\0\x01\x02");
+        assert!(matches!(op, FsOp::Read { limit: PDF_LIMIT, .. }));
+        assert_eq!(
+            h.body(),
+            Body::Pdf {
+                bytes: Arc::new(b"%PDF-\0\x01\x02".to_vec())
+            }
+        );
+        assert_eq!(h.body().message(), None);
+        assert_eq!(view(&h.model).unwrap().shown, None);
     }
 
     #[test]

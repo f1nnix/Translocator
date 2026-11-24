@@ -21,6 +21,7 @@ pub mod bookmarks;
 pub mod code;
 pub mod common;
 pub mod editor;
+pub mod pdf;
 pub mod properties;
 pub mod quick_look;
 pub mod rename;

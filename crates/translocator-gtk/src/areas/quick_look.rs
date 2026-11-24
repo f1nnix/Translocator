@@ -5,7 +5,9 @@
 //! A header with the entry's icon, its name and "Quick Look · Ctrl+Y"; the
 //! body by `body`: a centred status page (the message, or the error in
 //! the error colour), an image decoded off the main thread from
-//! `Core::quick_look_image()` and scaled down to fit, or read-only
+//! `Core::quick_look_image()` and scaled down to fit, a PDF from
+//! `Core::quick_look_pdf()` with its pages in a column ([`PdfView`]), or
+//! read-only
 //! coloured text with line numbers from `Core::quick_look_text()` in a
 //! [`CodeView`]; the footer (`footer`, and `shown` on the right) as a
 //! pane's status line. The body is fetched again only when `revision`
@@ -25,6 +27,7 @@ use gtk::{gdk, gdk_pixbuf, gio, glib};
 use tl_ffi::quick_look::{QuickLookBody, QuickLookSnapshot};
 
 use super::code::CodeView;
+use super::pdf::PdfView;
 use crate::file_list;
 use crate::shell;
 
@@ -40,12 +43,15 @@ pub struct QuickLookView {
     status: adw::StatusPage,
     picture: gtk::Picture,
     code: CodeView,
+    pdf: PdfView,
     footer: gtk::Label,
     shown: gtk::Label,
     /// The snapshot last drawn.
     last: RefCell<Option<QuickLookSnapshot>>,
     /// The image revision decoded or being decoded.
     image_revision: Rc<Cell<Option<u64>>>,
+    /// The PDF revision loaded.
+    pdf_revision: Cell<Option<u64>>,
 }
 
 impl QuickLookView {
@@ -86,11 +92,13 @@ impl QuickLookView {
             .build();
         let code = CodeView::new(false);
         code.set_editable(false);
+        let pdf = PdfView::new();
         let body = gtk::Stack::new();
         body.set_vexpand(true);
         body.add_named(&status, Some("status"));
         body.add_named(&picture, Some("image"));
         body.add_named(&code.root, Some("text"));
+        body.add_named(&pdf.root, Some("pdf"));
 
         let status_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
         status_bar.add_css_class("tl-status");
@@ -116,10 +124,12 @@ impl QuickLookView {
             status,
             picture,
             code,
+            pdf,
             footer,
             shown,
             last: RefCell::new(None),
             image_revision: Rc::new(Cell::new(None)),
+            pdf_revision: Cell::new(None),
         }
     }
 
@@ -148,6 +158,10 @@ impl QuickLookView {
         };
         self.root.update_property(&[gtk::accessible::Property::Label(&label)]);
 
+        // A document is let go of as soon as something else is shown.
+        if preview.body != QuickLookBody::Pdf && self.pdf_revision.take().is_some() {
+            self.pdf.clear();
+        }
         if let Some((message, error)) = preview.body.message() {
             self.show_message(preview, message, error);
             return;
@@ -160,6 +174,7 @@ impl QuickLookView {
                 self.body.set_visible_child_name("text");
             }
             QuickLookBody::Image { .. } => self.show_image(preview),
+            QuickLookBody::Pdf => self.show_pdf(preview),
             _ => {}
         }
     }
@@ -181,6 +196,24 @@ impl QuickLookView {
             self.status.remove_css_class("error");
         }
         self.body.set_visible_child_name("status");
+    }
+
+    /// Loads the PDF when its revision is new; one poppler cannot read says
+    /// so in place of the pages.
+    fn show_pdf(&self, preview: &QuickLookSnapshot) {
+        if self.pdf_revision.get() != Some(preview.revision) {
+            self.pdf_revision.set(Some(preview.revision));
+            if !self.pdf.load(shell::core().quick_look_pdf()) {
+                self.status.set_icon_name(Some("x-office-document-symbolic"));
+                self.status.set_title("This PDF cannot be shown");
+                self.status.remove_css_class("error");
+                self.body.set_visible_child_name("status");
+                return;
+            }
+        } else if self.pdf.is_empty() {
+            return;
+        }
+        self.body.set_visible_child_name("pdf");
     }
 
     /// Decodes the image on a worker thread (scaled to at most

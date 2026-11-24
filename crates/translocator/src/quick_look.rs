@@ -84,7 +84,12 @@ pub fn render(view: &QuickLookView, window: &mut Window, cx: &mut App) -> AnyEle
         .child(div().flex_1().min_w_0().truncate().text_sm().child(view.name.clone()))
         .child(div().flex_shrink_0().text_xs().text_color(theme.muted_foreground).child(hint));
 
-    let body = match (view.body.message(), image, text) {
+    // This shell draws no PDFs; the SwiftUI and GTK ones do.
+    let message = match &view.body {
+        Body::Pdf { .. } => Some(("PDF", false)),
+        body => body.message(),
+    };
+    let body = match (message, image, text) {
         (Some((message, danger)), _, _) => v_flex()
             .size_full()
             .justify_center()

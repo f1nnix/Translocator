@@ -6,9 +6,9 @@
 //! cursor, and ⌘Y (`Command::ToggleQuickLook`) turns it off.
 //!
 //! The snapshot says what kind of body there is; the body itself (text up
-//! to 256 KB, image bytes up to 8 MB) is fetched with
-//! [`Core::quick_look_text`] or [`Core::quick_look_image`] only when
-//! `revision` moves. The Swift side is
+//! to 256 KB, image bytes up to 8 MB, a PDF up to 32 MB) is fetched with
+//! [`Core::quick_look_text`], [`Core::quick_look_image`] or
+//! [`Core::quick_look_pdf`] only when `revision` moves. The Swift side is
 //! `macos/Sources/Translocator/Areas/QuickLookView.swift`.
 
 use tl_app::quick_look::{Body, ImageFormat as CoreFormat, QuickLookView};
@@ -47,6 +47,9 @@ pub enum QuickLookBody {
     Note { message: String },
     /// Bytes to decode (`Core::quick_look_image`), scaled to fit.
     Image { format: ImageFormat },
+    /// A PDF (`Core::quick_look_pdf`), every page in a column, scaled to
+    /// the width and scrolled.
+    Pdf,
     /// Read-only text with line numbers, no wrapping
     /// (`Core::quick_look_text`), coloured as `language`.
     Text { language: String },
@@ -56,14 +59,14 @@ pub enum QuickLookBody {
 
 impl QuickLookBody {
     /// The line in the middle of the preview and whether it is an error;
-    /// `None` for an image or text.
+    /// `None` for an image, a PDF or text.
     pub fn message(&self) -> Option<(&str, bool)> {
         match self {
             QuickLookBody::Nothing => Some(("Nothing to preview", false)),
             QuickLookBody::Reading => Some(("Reading…", false)),
             QuickLookBody::Note { message } => Some((message, false)),
             QuickLookBody::Error { message } => Some((message, true)),
-            QuickLookBody::Image { .. } | QuickLookBody::Text { .. } => None,
+            QuickLookBody::Image { .. } | QuickLookBody::Pdf | QuickLookBody::Text { .. } => None,
         }
     }
 }
@@ -104,6 +107,7 @@ pub(crate) fn snapshot(view: &QuickLookView) -> QuickLookSnapshot {
         Body::Reading => QuickLookBody::Reading,
         Body::Note(message) => QuickLookBody::Note { message: message.clone() },
         Body::Image { format, .. } => QuickLookBody::Image { format: (*format).into() },
+        Body::Pdf { .. } => QuickLookBody::Pdf,
         Body::Text { language, .. } => QuickLookBody::Text {
             language: language.to_string(),
         },
@@ -140,6 +144,15 @@ impl Core {
     pub fn quick_look_image(&self) -> Vec<u8> {
         match self.view().quick_look.as_ref().map(|q| &q.body) {
             Some(Body::Image { bytes, .. }) => bytes.as_ref().clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The preview's PDF as of the last snapshot; empty unless its body is
+    /// `Pdf`.
+    pub fn quick_look_pdf(&self) -> Vec<u8> {
+        match self.view().quick_look.as_ref().map(|q| &q.body) {
+            Some(Body::Pdf { bytes }) => bytes.as_ref().clone(),
             _ => Vec::new(),
         }
     }
@@ -195,6 +208,8 @@ mod tests {
             bytes: Arc::new(vec![1, 2, 3]),
         };
         assert_eq!(snapshot(&view(image)).body, QuickLookBody::Image { format: ImageFormat::Png });
+        let pdf = snapshot(&view(Body::Pdf { bytes: Arc::new(b"%PDF-".to_vec()) })).body;
+        assert_eq!((pdf.clone(), pdf.message()), (QuickLookBody::Pdf, None));
         let error = snapshot(&view(Body::Error("denied".into()))).body;
         assert_eq!(error.message(), Some(("denied", true)));
         assert_eq!(snapshot(&view(Body::Reading)).body.message(), Some(("Reading…", false)));

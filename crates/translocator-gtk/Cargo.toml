@@ -31,6 +31,8 @@ gtk = { package = "gtk4", version = "0.11", features = ["gnome_46"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
 # GtkSourceView 5 for the viewer, the editor and quick look.
 sourceview5 = "0.11"
+# poppler-glib draws PDFs in quick look (0.82 for loading from bytes).
+poppler = { package = "poppler-rs", version = "0.26", features = ["v0_82"] }
 async-channel = "2"
 serde_json.workspace = true
 
@@ -88,6 +90,7 @@ assets = [
 gtk4 = ">= 4.14"
 libadwaita = ">= 1.5"
 gtksourceview5 = "*"
+poppler-glib = "*"
 librsvg2 = "*"
 
 [package.metadata.generate-rpm.recommends]

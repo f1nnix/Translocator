@@ -1,5 +1,6 @@
 import AppKit
 import ImageIO
+import PDFKit
 import SwiftUI
 
 /// Quick look (⌘Y), drawn in place of the pane opposite the active one
@@ -7,7 +8,8 @@ import SwiftUI
 /// `crates/translocator/src/quick_look.rs`.
 ///
 /// A header with the entry's icon and name, the body (a centred message,
-/// an image scaled to fit, or read-only coloured text with line numbers)
+/// an image scaled to fit, a PDF's pages in a column, or read-only
+/// coloured text with line numbers)
 /// and the footer (kind, date, owner, mode; how much is shown). The core
 /// follows the cursor and waits for it to settle before reading; the body
 /// is fetched from `Core` only when `revision` moves, and images are
@@ -17,6 +19,8 @@ struct QuickLookView: View {
     @Environment(AppStore.self) private var store
     /// The decoded image of a revision (nil inside: it could not be read).
     @State private var image: (revision: UInt64, image: NSImage?)?
+    /// The parsed PDF of a revision (nil inside: it could not be read).
+    @State private var pdf: (revision: UInt64, document: PDFDocument?)?
 
     var body: some View {
         let colors = Theme.shared.colors
@@ -32,6 +36,7 @@ struct QuickLookView: View {
         }
         .background(Color(nsColor: colors.background))
         .task(id: imageKey) { await decode() }
+        .task(id: pdfKey) { await loadPdf() }
     }
 
     private var header: some View {
@@ -57,6 +62,7 @@ struct QuickLookView: View {
 
     @ViewBuilder
     private func content(_ palette: SyntaxPalette) -> some View {
+        let colors = Theme.shared.colors
         switch preview.body {
         case .nothing: message("Nothing to preview")
         case .reading: message("Reading…")
@@ -70,6 +76,16 @@ struct QuickLookView: View {
                 editable: false,
                 palette: palette
             )
+        case .pdf:
+            if let pdf, pdf.revision == preview.revision {
+                if let document = pdf.document {
+                    PdfPreview(document: document, background: colors.chrome, name: preview.name)
+                } else {
+                    message("This PDF cannot be shown")
+                }
+            } else {
+                Color.clear
+            }
         case .image:
             if let image, image.revision == preview.revision {
                 if let picture = image.image {
@@ -132,6 +148,21 @@ struct QuickLookView: View {
     }
 }
 
+extension QuickLookView {
+    /// The revision to load, when the body is a PDF.
+    private var pdfKey: UInt64? {
+        if case .pdf = preview.body { preview.revision } else { nil }
+    }
+
+    private func loadPdf() async {
+        guard let revision = pdfKey, pdf?.revision != revision else { return }
+        let data = store.core.quickLookPdf()
+        let loaded = await Task.detached(priority: .userInitiated) { LoadedPdf(data) }.value
+        if Task.isCancelled { return }
+        pdf = (revision, loaded.document)
+    }
+}
+
 /// An image decoded off the main thread: ImageIO's thumbnail (at most
 /// 2048 pixels on a side, the right way up), or `NSImage` for what ImageIO
 /// does not read (SVG).
@@ -152,5 +183,42 @@ private struct Decoded: @unchecked Sendable {
         } else {
             image = NSImage(data: data)
         }
+    }
+}
+
+/// A PDF in PDFKit's view: every page in one scrolling column, fitted to
+/// the width, from the top.
+private struct PdfPreview: NSViewRepresentable {
+    let document: PDFDocument
+    let background: NSColor
+    let name: String
+
+    func makeNSView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.displayMode = .singlePageContinuous
+        view.displayDirection = .vertical
+        view.displaysPageBreaks = true
+        view.autoScales = true
+        return view
+    }
+
+    func updateNSView(_ view: PDFView, context: Context) {
+        view.backgroundColor = background
+        view.setAccessibilityLabel("PDF \(name)")
+        guard view.document !== document else { return }
+        view.document = document
+        view.autoScales = true
+        if let first = document.page(at: 0) { view.go(to: first) }
+    }
+}
+
+/// A PDF parsed off the main thread; `nil` when PDFKit cannot read it or
+/// it has no pages.
+private struct LoadedPdf: @unchecked Sendable {
+    let document: PDFDocument?
+
+    init(_ data: Data) {
+        let document = PDFDocument(data: data)
+        self.document = (document?.pageCount ?? 0) > 0 ? document : nil
     }
 }

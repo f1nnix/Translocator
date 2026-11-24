@@ -32,6 +32,8 @@ const BASE_CSS: &str = r#"
 .tl-status label { opacity: 0.7; }
 .tl-chip { padding: 4px 10px; border-radius: 999px; font-size: smaller; }
 .tl-cover { background-color: alpha(@view_bg_color, 0.9); }
+listview.tl-pdf { background-color: alpha(@view_fg_color, 0.07); }
+listview.tl-pdf > row, listview.tl-pdf > row:hover { padding: 0; background: none; }
 
 LIST ROW { padding: 0; min-height: 0; border-radius: 0; margin: 0; }
 .tl-list > listview > row > cell { padding: 0; min-height: 0; }
