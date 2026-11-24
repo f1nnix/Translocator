@@ -1,9 +1,13 @@
-<h1 align="center">🗂️ Translocator</h1>
+<p align="center">
+  <img src="packaging/translocator-256.png" width="128" height="128" alt="">
+</p>
+
+<h1 align="center">Translocator</h1>
 
 <p align="center">A dual-pane file manager for macOS and Linux.</p>
 
 <p align="center">
-  <img src="docs/featured-image.png" alt="Translocator, a dual-pane file manager for macOS and Linux.">
+  <img src="docs/featured-image.png" alt="Translocator with a local project on the left, three files marked, and the same project's deploy folder on an SSH server on the right.">
 </p>
 
 ## ✨ Features
@@ -15,6 +19,10 @@
 - **List, columns or icons** — each pane remembers its own view. The column view works like Finder's: the folders above to the left, the one under the cursor to the right, ← and → to walk between them. ⌥⌘1, ⌥⌘2 and ⌥⌘3 switch.
 - **Everything from the keyboard** — type to filter the list, mark with Space, find files, check permissions and sizes, open a command line or a terminal in the folder you are looking at.
 - **Fully themable** — ten colour schemes, each with a light and a dark variant: Catppuccin, Dracula, Gruvbox, Nord, Solarized, Tokyo Night and more. Follows the system appearance, or stays on the one you pick.
+
+<p align="center">
+  <img src="docs/quick-look.png" alt="Quick preview of a docker-compose.yml on an SSH server, next to the server's folders in the column view.">
+</p>
 
 ## 🔐 SSH provider
 
@@ -36,7 +44,11 @@ Listings, `find`, chmod, chown, archives and multi-rename all work the same way:
 
 ## 📦 Install
 
-On **Linux**, take the `.deb` or `.rpm` from the [releases](https://github.com/f1nnix/Translocator/releases).
+Take a package from the [releases](https://github.com/f1nnix/Translocator/releases):
+
+- **macOS 26** — the `.dmg`, a universal app signed and notarized by Apple.
+- **Ubuntu 24.04 and newer** — the `.deb`.
+- **Fedora** — the `.rpm`.
 
 To build it yourself:
 
