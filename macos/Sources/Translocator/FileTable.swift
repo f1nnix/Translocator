@@ -46,45 +46,9 @@ struct FileTable: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let coordinator = context.coordinator
-        let table = FileTableView()
-        table.coordinator = coordinator
-        coordinator.table = table
-        table.dataSource = coordinator
-        table.delegate = coordinator
-        table.headerView = NSTableHeaderView()
-        table.style = .fullWidth
-        table.selectionHighlightStyle = .none
-        table.allowsMultipleSelection = false
-        table.allowsEmptySelection = true
-        table.allowsColumnReordering = false
-        table.usesAlternatingRowBackgroundColors = false
-        table.intercellSpacing = NSSize(width: 6, height: 0)
-        table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
-        table.registerForDraggedTypes([.translocatorFiles, .fileURL])
-        table.setDraggingSourceOperationMask([.copy], forLocal: false)
-        table.setAccessibilityLabel("\(side.name) pane files")
-        for column in FileColumn.allCases {
-            let col = NSTableColumn(identifier: column.identifier)
-            col.title = column.title
-            col.headerCell.alignment = column.alignment
-            col.width = column.width
-            col.minWidth = column == .name ? 120 : 30
-            col.resizingMask = column == .name ? .autoresizingMask : .userResizingMask
-            table.addTableColumn(col)
-        }
-        let scroll = NSScrollView()
-        scroll.documentView = table
-        scroll.hasVerticalScroller = true
-        scroll.hasHorizontalScroller = false
-        scroll.autohidesScrollers = true
-        scroll.drawsBackground = true
-        scroll.borderType = .noBorder
-        scroll.postsFrameChangedNotifications = true
-        coordinator.observeWidth(of: scroll)
-        store.register(table, for: side)
-        coordinator.apply(colors: colors)
-        coordinator.apply(pane: pane, general: general, active: active)
+        let scroll = context.coordinator.makeScroll(compact: false)
+        context.coordinator.apply(colors: colors)
+        context.coordinator.apply(pane: pane, general: general, active: active)
         return scroll
     }
 
@@ -159,9 +123,55 @@ final class FileTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDe
     private var mirroring = false
     private var keyObservers: [NSObjectProtocol] = []
 
+    /// One column of names and no header: the pane's own column in the
+    /// column view.
+    private(set) var compact = false
+
     init(side: Side, store: AppStore) {
         self.side = side
         self.store = store
+    }
+
+    /// The table in its scroll view, registered as the pane's keyboard view.
+    func makeScroll(compact: Bool) -> NSScrollView {
+        self.compact = compact
+        let table = FileTableView()
+        table.coordinator = self
+        self.table = table
+        table.dataSource = self
+        table.delegate = self
+        table.headerView = compact ? nil : NSTableHeaderView()
+        table.style = .fullWidth
+        table.selectionHighlightStyle = .none
+        table.allowsMultipleSelection = false
+        table.allowsEmptySelection = true
+        table.allowsColumnReordering = false
+        table.usesAlternatingRowBackgroundColors = false
+        table.intercellSpacing = NSSize(width: 6, height: 0)
+        table.columnAutoresizingStyle = .firstColumnOnlyAutoresizingStyle
+        table.registerForDraggedTypes(PaneDrop.types)
+        table.setDraggingSourceOperationMask([.copy], forLocal: false)
+        table.setAccessibilityLabel("\(side.name) pane files")
+        for column in compact ? [.name] : FileColumn.allCases {
+            let col = NSTableColumn(identifier: column.identifier)
+            col.title = column.title
+            col.headerCell.alignment = column.alignment
+            col.width = column.width
+            col.minWidth = column == .name ? (compact ? 60 : 120) : 30
+            col.resizingMask = column == .name ? .autoresizingMask : .userResizingMask
+            table.addTableColumn(col)
+        }
+        let scroll = NSScrollView()
+        scroll.documentView = table
+        scroll.hasVerticalScroller = true
+        scroll.hasHorizontalScroller = false
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = true
+        scroll.borderType = .noBorder
+        scroll.postsFrameChangedNotifications = true
+        observeWidth(of: scroll)
+        store.register(table, for: side)
+        return scroll
     }
 
     /// The list has the keyboard, in the key window.
@@ -212,6 +222,7 @@ final class FileTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDe
             redraw(rows: [Int(old.cursor), Int(next.cursor)])
         }
         let cursor = Int(next.cursor)
+        if compact { table.sizeLastColumnToFit() }
         if cursor < Int(next.rowCount) {
             let moved = reload || old?.cursor != next.cursor
             if moved { table.scrollRowToVisible(cursor) }
@@ -260,7 +271,7 @@ final class FileTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDe
 
     /// Drops columns in narrow panes: Permissions, then Modified, then Ext.
     func updateColumns() {
-        guard let table, let width = table.enclosingScrollView?.frame.width else { return }
+        guard !compact, let table, let width = table.enclosingScrollView?.frame.width else { return }
         let n = width < 360 ? 3 : width < 470 ? 2 : width < 590 ? 1 : 0
         guard n != narrow else { return }
         narrow = n
@@ -341,7 +352,7 @@ final class FileTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDe
                              colors: colors ?? .system)
         if column == .name {
             let cell = (tableView.makeView(withIdentifier: NameCell.identifier, owner: nil) as? NameCell) ?? NameCell()
-            cell.show(row, style: style, icons: general.showIcons)
+            cell.show(row, style: style, icons: general.showIcons, chevron: compact)
             return cell
         }
         let cell = (tableView.makeView(withIdentifier: TextCell.identifier, owner: nil) as? TextCell) ?? TextCell()
@@ -377,41 +388,16 @@ final class FileTableCoordinator: NSObject, NSTableViewDataSource, NSTableViewDe
         _ tableView: NSTableView, validateDrop info: NSDraggingInfo, proposedRow row: Int,
         proposedDropOperation dropOperation: NSTableView.DropOperation
     ) -> NSDragOperation {
-        let board = info.draggingPasteboard
-        if let data = board.data(forType: .translocatorFiles),
-           let payload = try? JSONDecoder().decode(DragPayload.self, from: data)
-        {
-            guard payload.dragged.side != side else { return [] }
-            tableView.setDropRow(-1, dropOperation: .on)
-            return Self.moving ? .move : .copy
-        }
-        guard board.canReadObject(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) else { return [] }
-        tableView.setDropRow(-1, dropOperation: .on)
-        return .copy
+        let operation = PaneDrop.validate(info, side: side)
+        if !operation.isEmpty { tableView.setDropRow(-1, dropOperation: .on) }
+        return operation
     }
 
     func tableView(
         _ tableView: NSTableView, acceptDrop info: NSDraggingInfo, row: Int,
         dropOperation: NSTableView.DropOperation
     ) -> Bool {
-        let board = info.draggingPasteboard
-        if let data = board.data(forType: .translocatorFiles),
-           let payload = try? JSONDecoder().decode(DragPayload.self, from: data)
-        {
-            guard payload.dragged.side != side else { return false }
-            store.pane(side, .drop(drag: payload.dragged, mode: Self.moving ? .move : .copy))
-            return true
-        }
-        let urls = board.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL] ?? []
-        guard !urls.isEmpty else { return false }
-        store.send(.dropExternal(side: side, paths: urls.map(\.path)))
-        return true
-    }
-
-    /// ⇧ or ⌘ held at the drop moves instead of copying.
-    private static var moving: Bool {
-        let flags = NSEvent.modifierFlags
-        return flags.contains(.shift) || flags.contains(.command)
+        PaneDrop.accept(info, side: side, store: store)
     }
 }
 
@@ -484,7 +470,10 @@ final class NameCell: NSTableCellView {
     private let icon = NSImageView()
     private let name = label()
     private let link = label()
+    /// After a folder's name in the column view: there is more to the right.
+    private let chevron = NSImageView()
     private var iconWidth: NSLayoutConstraint!
+    private var chevronWidth: NSLayoutConstraint!
 
     init() {
         super.init(frame: .zero)
@@ -492,8 +481,12 @@ final class NameCell: NSTableCellView {
         icon.translatesAutoresizingMaskIntoConstraints = false
         icon.imageScaling = .scaleProportionallyDown
         link.setContentHuggingPriority(.required, for: .horizontal)
-        for view in [icon, name, link] { addSubview(view) }
+        chevron.translatesAutoresizingMaskIntoConstraints = false
+        chevron.imageScaling = .scaleProportionallyDown
+        chevron.isHidden = true
+        for view in [icon, name, link, chevron] { addSubview(view) }
         iconWidth = icon.widthAnchor.constraint(equalToConstant: 16)
+        chevronWidth = chevron.widthAnchor.constraint(equalToConstant: 0)
         NSLayoutConstraint.activate([
             icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
@@ -502,8 +495,12 @@ final class NameCell: NSTableCellView {
             name.centerYAnchor.constraint(equalTo: centerYAnchor),
             link.leadingAnchor.constraint(equalTo: name.trailingAnchor, constant: 6),
             link.centerYAnchor.constraint(equalTo: centerYAnchor),
-            link.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -2),
+            link.trailingAnchor.constraint(lessThanOrEqualTo: chevron.leadingAnchor, constant: -2),
             link.widthAnchor.constraint(lessThanOrEqualToConstant: 220),
+            name.trailingAnchor.constraint(lessThanOrEqualTo: chevron.leadingAnchor, constant: -2),
+            chevron.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+            chevron.centerYAnchor.constraint(equalTo: centerYAnchor),
+            chevronWidth,
         ])
         textField = name
         imageView = icon
@@ -511,7 +508,7 @@ final class NameCell: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func show(_ row: Row, style: RowStyle, icons: Bool) {
+    func show(_ row: Row, style: RowStyle, icons: Bool, chevron folder: Bool = false) {
         name.stringValue = row.name
         name.font = style.font
         name.textColor = style.text
@@ -525,6 +522,14 @@ final class NameCell: NSTableCellView {
             let config = NSImage.SymbolConfiguration(pointSize: style.fontSize, weight: .regular)
             icon.image = symbolImage(row.icon.symbol)?.withSymbolConfiguration(config)
             icon.contentTintColor = style.icon
+        }
+        let more = folder && row.isDir && !row.isParent
+        chevron.isHidden = !more
+        chevronWidth.constant = more ? 9 : 0
+        if more {
+            let config = NSImage.SymbolConfiguration(pointSize: max(style.fontSize - 3, 8), weight: .semibold)
+            chevron.image = symbolImage("chevron.right")?.withSymbolConfiguration(config)
+            chevron.contentTintColor = style.muted
         }
         alphaValue = style.alpha
         var description = row.isParent ? "Enclosing folder" : row.name

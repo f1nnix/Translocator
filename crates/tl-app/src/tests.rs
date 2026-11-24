@@ -128,6 +128,8 @@ impl Shell {
                         .unwrap(),
                     _ => vec![],
                 },
+                // Waits are over at once.
+                Effect::Sleep(mut req) => self.core.resolve(&mut req, ()).unwrap(),
                 Effect::Platform(mut req) => match req.operation.clone() {
                     PlatformOp::Toast { message, .. } => {
                         self.toasts.push(message);
@@ -403,3 +405,115 @@ fn the_console_stays_bounded() {
     assert_eq!(console.version, 600);
 }
 
+
+fn tree() -> Vec<(&'static str, Vec<Entry>)> {
+    let mut files = logs();
+    files.push(("/", vec![dir("left"), dir("right")]));
+    files
+}
+
+fn column_names(column: &view::ColumnView) -> Vec<String> {
+    column.order.iter().map(|ix| column.listing.names[*ix as usize].clone()).collect()
+}
+
+fn selected_name(column: &view::ColumnView) -> Option<String> {
+    column.selected.map(|row| column_names(column)[row].clone())
+}
+
+#[test]
+fn the_column_view_walks_with_the_arrows() {
+    use settings::ViewMode;
+    let mut shell = Shell::new(&tree());
+    shell.cmd(C::ViewAs(ViewMode::Columns));
+    let view = shell.view();
+    let pane = &view.panes[0];
+    assert_eq!(pane.view_mode, ViewMode::Columns);
+    assert_eq!(view.panes[1].view_mode, ViewMode::List, "each pane has its own view");
+    assert_eq!(view.settings.session.left_view, ViewMode::Columns, "and it is remembered");
+    assert_eq!(shell.names(Side::Left)[0], "logs", "no \"..\": the column to the left is the way up");
+    let paths: Vec<String> = pane.columns.iter().map(|c| c.path.display()).collect();
+    assert_eq!(paths, ["/"]);
+    assert_eq!(selected_name(&pane.columns[0]).as_deref(), Some("left"));
+    let preview = pane.preview.as_ref().expect("the cursor is on a folder");
+    assert_eq!(preview.path.display(), "/left/logs");
+    assert_eq!(column_names(preview), ["old.log"]);
+
+    // Into the folder: its rows are there before it is listed again.
+    shell.hold = true;
+    shell.cmd(C::CursorRight);
+    assert_eq!(shell.view().panes[0].display, "/left/logs");
+    assert_eq!(shell.names(Side::Left), ["old.log"]);
+    shell.release_held();
+    let view = shell.view();
+    let paths: Vec<String> = view.panes[0].columns.iter().map(|c| c.path.display()).collect();
+    assert_eq!(paths, ["/", "/left"]);
+    assert_eq!(selected_name(&view.panes[0].columns[1]).as_deref(), Some("logs"));
+    assert!(view.panes[0].preview.is_none(), "the cursor is on a file");
+
+    // Right on a file stays; left goes back out, onto the folder.
+    shell.cmd(C::CursorRight);
+    assert_eq!(shell.view().panes[0].display, "/left/logs");
+    shell.cmd(C::CursorLeft);
+    assert_eq!(shell.view().panes[0].display, "/left");
+    assert_eq!(shell.cursor_name(Side::Left), "logs");
+    shell.cmd(C::CursorLeft);
+    assert_eq!(shell.view().panes[0].display, "/");
+    assert_eq!(shell.cursor_name(Side::Left), "left");
+    assert!(shell.view().panes[0].columns.is_empty());
+}
+
+#[test]
+fn a_press_in_another_column_moves_the_pane_there() {
+    use settings::ViewMode;
+    let mut shell = Shell::new(&tree());
+    shell.cmd(C::ViewAs(ViewMode::Columns));
+    // "right" in the root column.
+    shell.send(Event::Pane(Side::Left, pane::PaneInput::ColumnClick { column: 0, row: 1 }));
+    assert_eq!(shell.view().panes[0].display, "/");
+    assert_eq!(shell.cursor_name(Side::Left), "right");
+    assert_eq!(column_names(shell.view().panes[0].preview.as_ref().unwrap()), ["r.txt"]);
+    // The file in the column to the right.
+    shell.send(Event::Pane(Side::Left, pane::PaneInput::ColumnClick { column: 0, row: 0 }));
+    assert_eq!(shell.view().panes[0].display, "/right");
+    assert_eq!(shell.cursor_name(Side::Left), "r.txt");
+}
+
+#[test]
+fn going_back_to_the_list_brings_back_the_way_up() {
+    use settings::ViewMode;
+    let mut shell = Shell::new(&tree());
+    shell.cmd(C::ViewAs(ViewMode::Columns));
+    shell.cmd(C::ViewAs(ViewMode::List));
+    assert_eq!(shell.names(Side::Left)[0], "..");
+    assert_eq!(shell.cursor_name(Side::Left), "logs", "the cursor keeps its folder");
+    assert!(shell.view().panes[0].columns.is_empty());
+    // In the list, the side arrows do nothing.
+    shell.cmd(C::CursorRight);
+    shell.cmd(C::CursorLeft);
+    assert_eq!(shell.view().panes[0].display, "/left");
+    assert_eq!(shell.cursor_name(Side::Left), "logs");
+}
+
+#[test]
+fn the_grid_moves_by_rows_and_icons() {
+    use settings::ViewMode;
+    let mut shell = Shell::new(&tree());
+    shell.cmd(C::ViewAs(ViewMode::Grid));
+    shell.send(Event::Pane(Side::Left, pane::PaneInput::GridColumns(3)));
+    // .. logs src / app.log db.log logrotate.conf / notes.txt
+    let cursor = |shell: &Shell| shell.view().panes[0].cursor;
+    shell.cmd(C::CursorRight);
+    assert_eq!(cursor(&shell), 1);
+    shell.cmd(C::CursorDown);
+    assert_eq!(cursor(&shell), 4);
+    shell.cmd(C::CursorDown);
+    assert_eq!(cursor(&shell), 6, "onto the last icon of the shorter row below");
+    shell.cmd(C::CursorDown);
+    assert_eq!(cursor(&shell), 6);
+    shell.cmd(C::CursorUp);
+    assert_eq!(cursor(&shell), 3);
+    shell.cmd(C::CursorLeft);
+    assert_eq!(cursor(&shell), 2);
+    shell.cmd(C::CursorUp);
+    assert_eq!(cursor(&shell), 2, "the top row stays");
+}

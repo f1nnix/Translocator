@@ -13,6 +13,7 @@
 
 pub mod bookmarks;
 pub mod capabilities;
+pub mod columns;
 pub mod conn;
 pub mod dialog;
 pub mod editor;
@@ -116,6 +117,7 @@ impl App for Translocator {
         let mut out = Out::default();
         model::update(event, model, &mut out);
         out.push(quick_look::follow(model));
+        out.push(columns::follow(model));
         out.push(render());
         Command::all(out.cmds)
     }

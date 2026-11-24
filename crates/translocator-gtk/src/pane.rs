@@ -5,7 +5,7 @@
 //! Everything is drawn from the pane's snapshot and redrawn only where the
 //! snapshot changed; every click becomes core input.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ use gtk::{gdk, glib};
 use tl_ffi::Core;
 use tl_ffi::input::{Command, Input, PaneInput};
 use tl_ffi::snapshot::PaneSnapshot;
-use tl_ffi::types::{LocationKind, Side};
+use tl_ffi::types::{LocationKind, Side, ViewMode};
 
 use crate::file_list::FileList;
 use crate::keys::KeyMap;
@@ -31,6 +31,9 @@ pub struct PaneView {
     crumbs: gtk::Box,
     spinner: gtk::Spinner,
     sudo: gtk::Button,
+    /// List, columns, icons, and whether they are being set from a
+    /// snapshot.
+    view_buttons: (Vec<(ViewMode, gtk::ToggleButton)>, Rc<Cell<bool>>),
     tabs_bar: gtk::ScrolledWindow,
     tabs: gtk::Box,
     places_bar: gtk::Box,
@@ -120,9 +123,45 @@ impl PaneView {
         sudo.set_focus_on_click(false);
         sudo.set_visible(false);
         sudo.connect_clicked(move |_| shell::command_on(side, Command::ToggleSudo));
+        // How the pane shows its folder.
+        let views = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        views.add_css_class("linked");
+        let mut view_buttons: Vec<(ViewMode, gtk::ToggleButton)> = Vec::new();
+        // Set while the buttons are made to show the snapshot's view, so
+        // that is not taken for a choice.
+        let showing_view = Rc::new(Cell::new(false));
+        for (mode, icons, label) in [
+            (ViewMode::List, &["view-list-symbolic"][..], "as List"),
+            (ViewMode::Columns, &["view-columns-symbolic", "view-dual-symbolic"][..], "as Columns"),
+            (ViewMode::Grid, &["view-grid-symbolic"][..], "as Icons"),
+        ] {
+            let button = gtk::ToggleButton::new();
+            button.set_child(Some(&gtk::Image::from_gicon(&gtk::gio::ThemedIcon::from_names(icons))));
+            button.add_css_class("flat");
+            button.set_focus_on_click(false);
+            button.set_tooltip_text(Some(&format!("View {label}")));
+            button.update_property(&[gtk::accessible::Property::Label(&format!("View {label}"))]);
+            if let Some((_, first)) = view_buttons.first() {
+                button.set_group(Some(first));
+            }
+            let showing = showing_view.clone();
+            button.connect_toggled(move |button| {
+                if button.is_active() && !showing.get() {
+                    shell::send(Input::Pane {
+                        side,
+                        input: PaneInput::ViewAs { mode },
+                    });
+                    shell::restore_focus_soon();
+                }
+            });
+            views.append(&button);
+            view_buttons.push((mode, button));
+        }
+        let view_buttons = (view_buttons, showing_view);
         header.append(&location);
         header.append(&path_box);
         header.append(&spinner);
+        header.append(&views);
         header.append(&sudo);
 
         // ----- tabs -----
@@ -159,7 +198,7 @@ impl PaneView {
         // ----- the list and what lies over it -----
         let list = FileList::new(core, side);
         let overlay = gtk::Overlay::new();
-        overlay.set_child(Some(&list.scrolled));
+        overlay.set_child(Some(&list.root));
         overlay.set_vexpand(true);
 
         let filter_chip = gtk::Box::new(gtk::Orientation::Horizontal, 6);
@@ -270,6 +309,7 @@ impl PaneView {
             crumbs,
             spinner,
             sudo,
+            view_buttons,
             tabs_bar,
             tabs,
             places_bar,
@@ -375,6 +415,14 @@ impl PaneView {
             self.show_places(pane, keys);
         }
 
+        let (buttons, showing) = &self.view_buttons;
+        showing.set(true);
+        for (mode, button) in buttons {
+            if *mode == pane.view_mode && !button.is_active() {
+                button.set_active(true);
+            }
+        }
+        showing.set(false);
         self.list.apply(old, pane);
 
         // overlays

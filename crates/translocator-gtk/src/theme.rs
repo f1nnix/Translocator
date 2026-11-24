@@ -33,18 +33,24 @@ const BASE_CSS: &str = r#"
 .tl-chip { padding: 4px 10px; border-radius: 999px; font-size: smaller; }
 .tl-cover { background-color: alpha(@view_bg_color, 0.9); }
 
-.tl-list > listview > row { padding: 0; min-height: 0; border-radius: 0; margin: 0; }
+LIST ROW { padding: 0; min-height: 0; border-radius: 0; margin: 0; }
 .tl-list > listview > row > cell { padding: 0; min-height: 0; }
-.tl-list > listview > row:focus-visible { outline: none; }
-.tl-list > listview > row.marked { background-color: alpha(@warning_bg_color, 0.16); }
-.tl-list > listview > row.marked label { color: @warning_color; font-weight: bold; }
-.tl-list > listview > row.hidden-file > cell { opacity: 0.6; }
-.tl-list > listview > row:selected { background-color: alpha(currentColor, 0.10); }
-.tl-list.focused > listview > row:selected { background-color: @accent_bg_color; color: @accent_fg_color; }
-.tl-list.focused > listview > row:selected .tl-muted,
-.tl-list.focused > listview > row:selected .tl-icon { color: inherit; }
+LIST ROW:focus-visible { outline: none; }
+LIST ROW.marked { background-color: alpha(@warning_bg_color, 0.16); }
+LIST ROW.marked label { color: @warning_color; font-weight: bold; }
+LIST ROW.hidden-file > * { opacity: 0.6; }
+LIST ROW:selected { background-color: alpha(currentColor, 0.10); }
+LIST.focused ROW:selected { background-color: @accent_bg_color; color: @accent_fg_color; }
+LIST.focused ROW:selected .tl-muted, LIST.focused ROW:selected .tl-icon { color: inherit; }
 .tl-cell { padding: 0 6px; }
-.tl-list.focused > listview > row.marked:selected label { color: @accent_fg_color; }
+LIST.focused ROW.marked:selected label { color: @accent_fg_color; }
+gridview.tl-list > child { border-radius: 8px; margin: 3px; padding: 6px 2px; }
+.tl-grid-cell { min-width: 84px; }
+.tl-grid-cell .tl-icon { -gtk-icon-size: 40px; }
+.tl-column-strip separator { min-width: 1px; }
+.tl-chevron { opacity: 0.55; -gtk-icon-size: 10px; }
+.tl-info { padding: 36px 14px; }
+.tl-info-name { font-weight: bold; }
 .tl-muted { opacity: 0.65; }
 .tl-small { font-size: smaller; }
 .tl-icon { opacity: 0.75; }
@@ -69,7 +75,7 @@ pub struct Theme {
 impl Theme {
     pub fn install(display: &gdk::Display) -> Theme {
         let base = gtk::CssProvider::new();
-        base.load_from_string(BASE_CSS);
+        base.load_from_string(&expand(BASE_CSS));
         gtk::style_context_add_provider_for_display(display, &base, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
         let dynamic = gtk::CssProvider::new();
         gtk::style_context_add_provider_for_display(display, &dynamic, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION + 1);
@@ -104,7 +110,7 @@ impl Theme {
             general.font_size, general.row_height
         );
         if let Some(p) = tl_ffi::themes::palette(name.clone()) {
-            css.push_str(&palette_css(&p));
+            css.push_str(&expand(&palette_css(&p)));
         }
         if *self.loaded.borrow() != css {
             self.dynamic.load_from_string(&css);
@@ -117,18 +123,18 @@ impl Theme {
 fn palette_css(p: &ThemePalette) -> String {
     format!(
         r#"
-.tl-list, .tl-list > listview, .tl-list > listview > row {{ background-color: {bg}; color: {fg}; }}
+LIST, .tl-list > listview, LIST ROW {{ background-color: {bg}; color: {fg}; }}
 .tl-list > header > button {{ background-color: {chrome}; color: {muted}; box-shadow: none; border-bottom: 1px solid {border}; }}
-.tl-list > listview > row:hover {{ background-color: {hover}; }}
-.tl-list > listview > row.marked {{ background-color: {marked_bg}; }}
-.tl-list > listview > row.marked label {{ color: {marked}; }}
-.tl-list > listview > row:selected {{ background-color: {inactive}; color: {fg}; }}
-.tl-list.focused > listview > row:selected {{ background-color: {selection}; color: {fg}; }}
-.tl-list.focused > listview > row:selected .tl-muted {{ color: {muted}; }}
-.tl-list.focused > listview > row:selected .tl-icon {{ color: {muted}; }}
-.tl-list.focused > listview > row:selected .tl-icon.folder {{ color: {folder}; }}
-.tl-list.focused > listview > row:selected .tl-icon.exec {{ color: {exec}; }}
-.tl-list.focused > listview > row.marked:selected label {{ color: {marked}; }}
+LIST ROW:hover {{ background-color: {hover}; }}
+LIST ROW.marked {{ background-color: {marked_bg}; }}
+LIST ROW.marked label {{ color: {marked}; }}
+LIST ROW:selected {{ background-color: {inactive}; color: {fg}; }}
+LIST.focused ROW:selected {{ background-color: {selection}; color: {fg}; }}
+LIST.focused ROW:selected .tl-muted {{ color: {muted}; }}
+LIST.focused ROW:selected .tl-icon {{ color: {muted}; }}
+LIST.focused ROW:selected .tl-icon.folder {{ color: {folder}; }}
+LIST.focused ROW:selected .tl-icon.exec {{ color: {exec}; }}
+LIST.focused ROW.marked:selected label {{ color: {marked}; }}
 .tl-muted {{ color: {muted}; opacity: 1; }}
 .tl-icon {{ color: {muted}; opacity: 1; }}
 .tl-icon.folder {{ color: {folder}; }}
@@ -151,6 +157,43 @@ textview.tl-console, textview.tl-console text, scrolledwindow.tl-console {{ back
     )
 }
 
+/// The three shapes a pane's rows come in: the list (a column view), a
+/// column of the column view (a list view) and the icons (a grid view).
+const SHAPES: [(&str, &str); 3] = [
+    (".tl-list", " > listview > row"),
+    ("listview.tl-list", " > row"),
+    ("gridview.tl-list", " > child"),
+];
+
+/// Writes a rule with `LIST` and `ROW` in its selectors once for each of
+/// [`SHAPES`].
+fn expand(css: &str) -> String {
+    let mut out = String::with_capacity(css.len() * 2);
+    for line in css.lines() {
+        let Some((selectors, body)) = line.split_once('{').filter(|_| line.contains("LIST")) else {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        };
+        let mut all = Vec::new();
+        for selector in selectors.split(',').map(str::trim) {
+            if selector.contains("LIST") {
+                for (list, row) in SHAPES {
+                    all.push(selector.replace("LIST", list).replace(" ROW", row));
+                }
+            } else {
+                all.push(selector.to_string());
+            }
+        }
+        all.dedup();
+        out.push_str(&all.join(", "));
+        out.push_str(" {");
+        out.push_str(body);
+        out.push('\n');
+    }
+    out
+}
+
 /// `#rrggbb` as it is, `#rrggbbaa` as `rgba()`, which every GTK reads.
 pub(crate) fn color(hex: &str) -> String {
     let digits = hex.trim_start_matches('#');
@@ -165,6 +208,16 @@ pub(crate) fn color(hex: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn row_rules_cover_every_shape() {
+        let css = expand("LIST.focused ROW:selected, .x { color: red; }\n.y { }\n");
+        assert_eq!(
+            css,
+            ".tl-list.focused > listview > row:selected, listview.tl-list.focused > row:selected, \
+             gridview.tl-list.focused > child:selected, .x { color: red; }\n.y { }\n"
+        );
+    }
 
     #[test]
     fn translucent_colours_become_rgba() {

@@ -3,7 +3,7 @@ import AppKit
 /// The table of a pane. It keeps nothing of its own: every key, click,
 /// drag and menu becomes core input, and what it draws comes back in the
 /// next snapshot.
-final class FileTableView: NSTableView {
+final class FileTableView: NSTableView, PaneFocusable {
     weak var coordinator: FileTableCoordinator?
     private var pressRow: Int?
     private var pressEvent: NSEvent?
@@ -31,7 +31,8 @@ final class FileTableView: NSTableView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         // The active pane takes the keyboard when the window opens.
-        guard window != nil, let store, let side, store.snapshot.active == side, store.focusedPane == nil else { return }
+        guard window != nil, let store, let side, store.snapshot.active == side,
+              store.focusedPane == nil || store.focusedPane == side else { return }
         DispatchQueue.main.async { [weak self] in MainActor.assumeIsolated { self?.takeFocus() } }
     }
 
@@ -43,37 +44,10 @@ final class FileTableView: NSTableView {
 
     override func keyDown(with event: NSEvent) {
         guard let store, let side, let pane = coordinator?.pane else { return super.keyDown(with: event) }
-        if event.keyCode == 53 {
-            // Escape clears the filter; with none it is left alone.
-            if !pane.filter.isEmpty { store.command(.clearFilter, on: side) }
-            return
-        }
-        if let target = store.keys.target(for: event, in: [.pane, .workspace, .global]),
-           case .command(let command) = target
-        {
-            store.command(fill(command), on: side)
-            return
-        }
-        let flags = event.modifierFlags.intersection([.command, .control, .option])
-        if flags.isEmpty, let text = event.characters, !text.isEmpty,
-           !text.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || $0.value >= 0xF700 })
-        {
-            // The type-ahead filter; with no filter yet, + and - ask for a mask.
-            store.command(.type(text: text), on: side)
-            return
-        }
-        NSSound.beep()
+        if !PaneKeys.keyDown(event, store: store, side: side, pane: pane, page: pageRows) { NSSound.beep() }
     }
 
     /// Page Up and Down move by what fits in the list.
-    private func fill(_ command: Command) -> Command {
-        switch command {
-        case .pageUp: return .pageUp(rows: pageRows)
-        case .pageDown: return .pageDown(rows: pageRows)
-        default: return command
-        }
-    }
-
     private var pageRows: UInt32 {
         let visible = enclosingScrollView?.contentView.bounds.height ?? 400
         return UInt32(max(Int(visible / max(rowHeight, 1)) - 1, 1))
@@ -129,52 +103,12 @@ final class FileTableView: NSTableView {
     // ----- dragging out -----------------------------------------------------------
 
     private func startDrag(row: Int, event: NSEvent) {
-        guard let store, let side, let items = store.core.drag(side: side, row: UInt32(row)) else { return }
-        guard let payload = try? JSONEncoder().encode(DragPayload(items.dragged)) else { return }
-        let image = dragImage(items.label)
-        let origin = convert(event.locationInWindow, from: nil)
-        let frame = NSRect(x: origin.x - 8, y: origin.y - image.size.height / 2, width: image.size.width,
-                           height: image.size.height)
-        var dragItems: [NSDraggingItem] = []
-        if items.localPaths.isEmpty {
-            let item = NSPasteboardItem()
-            item.setData(payload, forType: .translocatorFiles)
-            dragItems.append(NSDraggingItem(pasteboardWriter: item))
-        } else {
-            // One item per file, so Finder and other apps take them all.
-            for (ix, path) in items.localPaths.enumerated() {
-                let item = NSPasteboardItem()
-                item.setString(URL(fileURLWithPath: path).absoluteString, forType: .fileURL)
-                if ix == 0 { item.setData(payload, forType: .translocatorFiles) }
-                dragItems.append(NSDraggingItem(pasteboardWriter: item))
-            }
-        }
-        for (ix, item) in dragItems.enumerated() {
-            item.setDraggingFrame(frame.offsetBy(dx: CGFloat(ix) * 2, dy: CGFloat(-ix) * 2), contents: ix == 0 ? image : nil)
-        }
-        beginDraggingSession(with: dragItems, event: event, source: self)
-    }
-
-    private func dragImage(_ label: String) -> NSImage {
-        let text = NSAttributedString(string: label, attributes: [
-            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-            .foregroundColor: NSColor.labelColor,
-        ])
-        let size = NSSize(width: min(text.size().width + 34, 320), height: 24)
-        return NSImage(size: size, flipped: false) { rect in
-            NSColor.windowBackgroundColor.withAlphaComponent(0.92).setFill()
-            NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6).fill()
-            NSColor.separatorColor.setStroke()
-            NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 6, yRadius: 6).stroke()
-            symbolImage("doc.on.doc")?.draw(in: NSRect(x: 8, y: 5, width: 14, height: 14))
-            text.draw(in: NSRect(x: 26, y: 4, width: rect.width - 30, height: 16))
-            return true
-        }
+        guard let store, let side else { return }
+        PaneDrag.start(from: self, store: store, side: side, row: row, event: event)
     }
 
     override func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
-        // Other applications copy; a drop on the other pane says itself.
-        context == .outsideApplication ? .copy : [.copy, .move, .generic]
+        PaneDrag.mask(context)
     }
 
     // ----- the keyboard locations menu ------------------------------------------------

@@ -8,7 +8,7 @@
 
 use tl_app::{DialogId, EditorId, Event, JobId, model, pane};
 
-use crate::types::{ConflictChoice, Side, SortKey, TransferMode, vpath};
+use crate::types::{ConflictChoice, Side, SortKey, TransferMode, ViewMode, vpath};
 use crate::{bookmarks, editor, properties, rename, settings, sync};
 
 /// Everything the UI tells the core.
@@ -68,6 +68,12 @@ pub enum Command {
     // cursor and marks
     CursorUp,
     CursorDown,
+    /// In the grid, the icon to the side; in the column view, out to the
+    /// folder above and into the one under the cursor.
+    CursorLeft,
+    CursorRight,
+    /// How the active pane shows its folder.
+    ViewAs { mode: ViewMode },
     /// Moves by `rows`: what fits in the list, as the shell measured it.
     PageUp { rows: u32 },
     PageDown { rows: u32 },
@@ -164,6 +170,7 @@ macro_rules! commands {
                     Command::Type { text } => model::Command::Type(text),
                     Command::Locations { side } => model::Command::Locations(side.map(Into::into)),
                     Command::GoToPlace { index } => model::Command::GoToPlace(index as usize),
+                    Command::ViewAs { mode } => model::Command::ViewAs(mode.into()),
                 }
             }
         }
@@ -177,6 +184,7 @@ macro_rules! commands {
                     model::Command::Type(text) => Command::Type { text },
                     model::Command::Locations(side) => Command::Locations { side: side.map(Into::into) },
                     model::Command::GoToPlace(index) => Command::GoToPlace { index: crate::types::usize32(index) },
+                    model::Command::ViewAs(mode) => Command::ViewAs { mode: mode.into() },
                 }
             }
         }
@@ -186,6 +194,8 @@ macro_rules! commands {
 commands!(
     CursorUp,
     CursorDown,
+    CursorLeft,
+    CursorRight,
     CursorHome,
     CursorEnd,
     MarkUp,
@@ -308,6 +318,14 @@ pub enum PaneInput {
     LocationsShown,
     /// Files from the other pane dropped here.
     Drop { drag: Dragged, mode: TransferMode },
+    /// A press on a row of a column other than the pane's own, in the
+    /// column view: `column` indexes `PaneSnapshot.columns`, and one past
+    /// their end is the preview column.
+    ColumnClick { column: u32, row: u32 },
+    /// How many icons a row of the grid holds now.
+    GridColumns { count: u32 },
+    /// Switches this pane's view.
+    ViewAs { mode: ViewMode },
 }
 
 impl From<PaneInput> for pane::PaneInput {
@@ -341,6 +359,12 @@ impl From<PaneInput> for pane::PaneInput {
                 drag: drag.into(),
                 mode: mode.into(),
             },
+            PaneInput::ColumnClick { column, row } => P::ColumnClick {
+                column: column as usize,
+                row: row as usize,
+            },
+            PaneInput::GridColumns { count } => P::GridColumns(count as usize),
+            PaneInput::ViewAs { mode } => P::ViewAs(mode.into()),
         }
     }
 }

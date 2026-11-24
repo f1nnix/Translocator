@@ -61,6 +61,36 @@ impl From<tl_app::settings::SortKey> for SortKey {
     }
 }
 
+/// How a pane shows its folder (`tl_app::settings::ViewMode`).
+#[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ViewMode {
+    List,
+    Columns,
+    Grid,
+}
+
+impl From<ViewMode> for tl_app::settings::ViewMode {
+    fn from(mode: ViewMode) -> Self {
+        use tl_app::settings::ViewMode as V;
+        match mode {
+            ViewMode::List => V::List,
+            ViewMode::Columns => V::Columns,
+            ViewMode::Grid => V::Grid,
+        }
+    }
+}
+
+impl From<tl_app::settings::ViewMode> for ViewMode {
+    fn from(mode: tl_app::settings::ViewMode) -> Self {
+        use tl_app::settings::ViewMode as V;
+        match mode {
+            V::List => ViewMode::List,
+            V::Columns => ViewMode::Columns,
+            V::Grid => ViewMode::Grid,
+        }
+    }
+}
+
 /// How a date is written in the file list.
 #[derive(uniffi::Enum, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DateFormat {

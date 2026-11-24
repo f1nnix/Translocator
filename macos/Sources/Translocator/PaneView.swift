@@ -21,13 +21,8 @@ struct PaneView: View {
                 PlacesRow(side: side, pane: pane)
                 Divider()
             }
-            FileTable(
-                side: side,
-                pane: pane,
-                general: store.snapshot.settings.general,
-                active: store.snapshot.active == side
-            )
-            .overlay { PaneOverlays(side: side, pane: pane) }
+            PaneContent(side: side, pane: pane)
+                .overlay { PaneOverlays(side: side, pane: pane) }
             Divider()
             HStack(spacing: 8) {
                 Text(pane.status)
@@ -50,6 +45,54 @@ struct PaneView: View {
     }
 }
 
+/// The list, the columns or the icons, as the pane is set to show.
+struct PaneContent: View {
+    let side: Side
+    let pane: PaneSnapshot
+    @Environment(AppStore.self) private var store
+
+    var body: some View {
+        let general = store.snapshot.settings.general
+        let active = store.snapshot.active == side
+        switch pane.viewMode {
+        case .list:
+            FileTable(side: side, pane: pane, general: general, active: active)
+        case .columns:
+            ColumnBrowser(side: side, pane: pane, general: general, active: active)
+        case .grid:
+            FileGrid(side: side, pane: pane, general: general, active: active)
+        }
+    }
+}
+
+/// How the pane shows its folder: list, columns or icons.
+struct ViewPicker: View {
+    let side: Side
+    let mode: ViewMode
+    @Environment(AppStore.self) private var store
+
+    var body: some View {
+        Picker("View", selection: Binding(get: { mode }, set: { store.pane(side, .viewAs(mode: $0)) })) {
+            ForEach(ViewMode.all, id: \.self) { mode in
+                Label(mode.title, systemImage: mode.symbol)
+                    .help(help(mode))
+                    .tag(mode)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelStyle(.iconOnly)
+        .labelsHidden()
+        .controlSize(.small)
+        .fixedSize()
+        .accessibilityLabel("\(side.name) pane view")
+    }
+
+    private func help(_ mode: ViewMode) -> String {
+        let key = store.keys.label(for: .viewAs(mode: mode)).map { " (\($0))" } ?? ""
+        return "View \(mode.title)\(key)"
+    }
+}
+
 /// The location menu, the path bar, the spinner and the sudo button.
 struct PaneHeader: View {
     let side: Side
@@ -68,6 +111,7 @@ struct PaneHeader: View {
                     .controlSize(.small)
                     .accessibilityLabel("Loading")
             }
+            ViewPicker(side: side, mode: pane.viewMode)
             if pane.caps.elevation {
                 Button {
                     store.command(.toggleSudo, on: side)

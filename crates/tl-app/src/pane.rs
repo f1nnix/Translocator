@@ -16,10 +16,11 @@ use tl_model::util::wildcard_match;
 use tl_model::{Entry, Place, SpaceInfo, VPath, VfsError};
 
 use crate::capabilities::*;
+use crate::columns::{self, Columns};
 use crate::dialog::{self, InputPurpose};
 use crate::ids::{ConnId, Ids, LOCAL, TabId};
 use crate::model::{Command as Cmd, Model, Reply, shell};
-use crate::settings::SortKey;
+use crate::settings::{SortKey, ViewMode};
 use crate::{Out, ops};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -125,6 +126,8 @@ pub struct Tab {
     /// How many rows the listing has before the filter (hidden files count
     /// only when shown).
     pub unfiltered: usize,
+    /// The folders around this one, for the column view.
+    pub columns: Columns,
 }
 
 impl Tab {
@@ -152,6 +155,7 @@ impl Tab {
             totals: Totals::default(),
             marked_totals: Totals::default(),
             unfiltered: 0,
+            columns: Columns::default(),
         }
     }
 
@@ -229,6 +233,8 @@ impl Tab {
 pub struct Pane {
     pub tabs: Vec<Tab>,
     pub active: usize,
+    /// Icons per row in the grid view, as the shell last laid them out.
+    pub grid_columns: usize,
 }
 
 impl Default for Pane {
@@ -248,6 +254,7 @@ impl Default for Pane {
                 sort,
             )],
             active: 0,
+            grid_columns: 1,
         }
     }
 }
@@ -362,6 +369,14 @@ pub enum PaneInput {
     LocationsShown,
     /// Files from the other pane dropped here.
     Drop { drag: Dragged, mode: tl_model::transfer::TransferMode },
+    /// A press on a row of a column other than the pane's own, in the
+    /// column view: `column` counts the columns left of the pane's own,
+    /// then the one to its right.
+    ColumnClick { column: usize, row: usize },
+    /// How many icons a row of the grid holds now.
+    GridColumns(usize),
+    /// Switches this pane's view (the header's picker).
+    ViewAs(ViewMode),
 }
 
 #[derive(Debug)]
@@ -369,6 +384,17 @@ pub enum PaneReply {
     Listed { tab: TabId, generation: u64, out: FsOutput },
     ArchiveOpened { tab: TabId, from: Loc, file: VPath, name: Vec<u8>, out: FsOutput },
     Elevated { tab: TabId, out: FsOutput },
+}
+
+/// What the rows of a pane are built from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Display {
+    pub sort: Sort,
+    pub show_hidden: bool,
+    pub folders_first: bool,
+    /// A ".." row on top (not in the column view, where the column to the
+    /// left is the way up).
+    pub parent_row: bool,
 }
 
 // ----- rows -----------------------------------------------------------------
@@ -505,16 +531,16 @@ fn compare(listing: &Listing, sort: Sort, folders_first: bool, a: usize, b: usiz
 
 /// Rebuilds what tab `tab` shows, keeping the cursor on `select`, or else
 /// on the entry it was on.
-fn rebuild(tab: &mut Tab, select: Option<&[u8]>, show_hidden: bool, folders_first: bool) {
+fn rebuild(tab: &mut Tab, select: Option<&[u8]>, display: Display) {
     let keep: Option<Vec<u8>> = select
         .map(<[u8]>::to_vec)
         .or_else(|| tab.cursor_entry().map(|e| e.name.clone()));
     let (order, unfiltered) = build_order(
         &tab.listing,
         tab.sort,
-        folders_first,
-        show_hidden,
-        tab.loc.path.is_root(),
+        display.folders_first,
+        display.show_hidden,
+        tab.loc.path.is_root() || !display.parent_row,
         &tab.filter,
     );
     tab.order = Arc::new(order);
@@ -543,16 +569,32 @@ fn rebuild(tab: &mut Tab, select: Option<&[u8]>, show_hidden: bool, folders_firs
     tab.update_marked_totals();
 }
 
-fn display_flags(model: &Model) -> (bool, bool) {
-    (model.settings.general.show_hidden, model.settings.general.folders_first)
+/// What the active tab of `side` builds its rows from (other tabs differ
+/// only in their sort, see [`Display::of`]).
+pub fn display(model: &Model, side: Side) -> Display {
+    Display {
+        sort: model.pane(side).tab().sort,
+        show_hidden: model.settings.general.show_hidden,
+        folders_first: model.settings.general.folders_first,
+        parent_row: model.settings.session.view(side) != ViewMode::Columns,
+    }
+}
+
+impl Display {
+    /// The same for another tab of the pane.
+    fn of(self, tab: &Tab) -> Display {
+        Display { sort: tab.sort, ..self }
+    }
 }
 
 /// A setting the rows are built from changed: rebuild every tab.
 pub fn settings_changed(model: &mut Model) {
-    let (show_hidden, folders_first) = display_flags(model);
-    for pane in &mut model.panes {
-        for tab in &mut pane.tabs {
-            rebuild(tab, None, show_hidden, folders_first);
+    for side in Side::BOTH {
+        let display = display(model, side);
+        for tab in &mut model.pane_mut(side).tabs {
+            let display = display.of(tab);
+            rebuild(tab, None, display);
+            tab.columns.resort(display);
         }
     }
 }
@@ -614,8 +656,8 @@ pub fn select_in_panes(model: &mut Model, key: &str, dir: &VPath, name: Vec<u8>,
 }
 
 fn listed(model: &mut Model, id: TabId, generation: u64, result: FsOutput, out: &mut Out) {
-    let (show_hidden, folders_first) = display_flags(model);
     let Some((side, ix)) = find_tab(model, id) else { return };
+    let display = display(model, side).of(&model.pane(side).tabs[ix]);
     let can_elevate;
     {
         let conn = model.pane(side).tabs[ix].loc.conn;
@@ -646,13 +688,13 @@ fn listed(model: &mut Model, id: TabId, generation: u64, result: FsOutput, out: 
                 .or_else(|| tab.cursor_entry().map(|e| e.name.clone()));
             tab.listing = Listing::new(entries);
             tab.error = None;
-            rebuild(tab, select.as_deref(), show_hidden, folders_first);
+            rebuild(tab, select.as_deref(), display);
             watch(model, side, ix, out);
         }
         Err(err) => {
             tab.error = Some(err.to_string());
             tab.listing = Listing::default();
-            tab.order = Arc::new(if tab.loc.path.is_root() { vec![] } else { vec![PARENT] });
+            tab.order = Arc::new(if tab.loc.path.is_root() || !display.parent_row { vec![] } else { vec![PARENT] });
             tab.cursor = 0;
             tab.totals = Totals::default();
             tab.marked_totals = Totals::default();
@@ -714,18 +756,35 @@ pub fn navigate(model: &mut Model, side: Side, path: VPath, select: Option<Vec<u
         enter(model, side, Loc { conn: host, path }, select, out);
         return;
     }
+    let display = display(model, side);
     let tab = model.pane_mut(side).tab_mut();
     tab.filter.clear();
     if tab.loc.path != path {
         let old = tab.loc.clone();
         tab.back.push((old, tab.elevated));
         tab.forward.clear();
-        tab.loc.path = path;
-        tab.reset_view();
-        unwatch(tab, out);
+        walk(tab, path, select.as_deref(), display, out);
     }
     reload_active_select(model, side, select, out);
     ops::location_changed(model, out);
+}
+
+/// Moves a tab to another folder on its file system. In the column view the
+/// folder it leaves stays on as a column, and one it arrives in that a
+/// column shows has its rows at once, until the listing asked for next
+/// replaces them.
+fn walk(tab: &mut Tab, path: VPath, select: Option<&[u8]>, display: Display, out: &mut Out) {
+    let columns = !display.parent_row;
+    if columns {
+        Columns::stash(tab, display);
+    }
+    tab.loc.path = path;
+    tab.reset_view();
+    unwatch(tab, out);
+    if columns && let Some(listing) = tab.columns.known(&tab.loc.path).cloned() {
+        tab.listing = listing;
+        rebuild(tab, select, display);
+    }
 }
 
 fn reload_active_select(model: &mut Model, side: Side, select: Option<Vec<u8>>, out: &mut Out) {
@@ -741,6 +800,7 @@ pub fn enter(model: &mut Model, side: Side, loc: Loc, select: Option<Vec<u8>>, o
     let old = std::mem::replace(&mut tab.loc, loc);
     tab.back.push((old, tab.elevated));
     tab.forward.clear();
+    tab.columns.reset();
     tab.reset_view();
     unwatch(tab, out);
     reload_active_select(model, side, select, out);
@@ -768,7 +828,9 @@ pub fn open_location(model: &mut Model, side: Side, loc: Loc, elevated: bool, ou
 }
 
 pub fn set_elevated(model: &mut Model, side: Side, elevated: bool, out: &mut Out) {
-    model.pane_mut(side).tab_mut().elevated = elevated;
+    let tab = model.pane_mut(side).tab_mut();
+    tab.elevated = elevated;
+    tab.columns.reset();
     reload_active(model, side, out);
     ops::location_changed(model, out);
 }
@@ -828,36 +890,48 @@ fn go_up(model: &mut Model, side: Side, out: &mut Out) {
 }
 
 fn go_back(model: &mut Model, side: Side, out: &mut Out) {
+    let display = display(model, side);
     let tab = model.pane_mut(side).tab_mut();
     let Some((prev, elevated)) = tab.back.pop() else { return };
-    let cur = std::mem::replace(&mut tab.loc, prev);
-    let cur_elevated = std::mem::replace(&mut tab.elevated, elevated);
     // Land on the folder (or archive) we came out of.
-    let select = cur
+    let select = tab
+        .loc
         .path
-        .relative_to(&tab.loc.path)
+        .relative_to(&prev.path)
         .and_then(|rel| rel.split(|b| *b == b'/').next())
         .filter(|name| !name.is_empty())
         .map(<[u8]>::to_vec);
-    tab.forward.push((cur, cur_elevated));
-    tab.filter.clear();
-    tab.reset_view();
-    unwatch(tab, out);
+    let cur = jump(tab, prev, elevated, select.as_deref(), display, out);
+    tab.forward.push(cur);
     reload_active_select(model, side, select, out);
     ops::location_changed(model, out);
 }
 
 fn go_forward(model: &mut Model, side: Side, out: &mut Out) {
+    let display = display(model, side);
     let tab = model.pane_mut(side).tab_mut();
     let Some((next, elevated)) = tab.forward.pop() else { return };
-    let cur = std::mem::replace(&mut tab.loc, next);
-    let cur_elevated = std::mem::replace(&mut tab.elevated, elevated);
-    tab.back.push((cur, cur_elevated));
-    tab.filter.clear();
-    tab.reset_view();
-    unwatch(tab, out);
+    let cur = jump(tab, next, elevated, None, display, out);
+    tab.back.push(cur);
     reload_active_select(model, side, None, out);
     ops::location_changed(model, out);
+}
+
+/// Moves a tab through its history: a walk on the same file system, a
+/// fresh start on another. Answers where it was.
+fn jump(tab: &mut Tab, to: Loc, elevated: bool, select: Option<&[u8]>, display: Display, out: &mut Out) -> (Loc, bool) {
+    let was = (tab.loc.clone(), tab.elevated);
+    tab.filter.clear();
+    if to.conn == tab.loc.conn && elevated == tab.elevated {
+        walk(tab, to.path, select, display, out);
+    } else {
+        tab.loc = to;
+        tab.elevated = elevated;
+        tab.columns.reset();
+        tab.reset_view();
+        unwatch(tab, out);
+    }
+    was
 }
 
 /// A file the pane can open as a folder.
@@ -975,11 +1049,11 @@ fn toggle_mark_at(tab: &mut Tab, row: usize) {
 /// Narrows or widens the list, keeping the cursor on its file for as long as
 /// that file still matches.
 fn set_filter(model: &mut Model, side: Side, query: String) {
-    let (show_hidden, folders_first) = display_flags(model);
+    let display = display(model, side);
     let tab = model.pane_mut(side).tab_mut();
     let keep = tab.cursor_entry().map(|e| e.name.clone());
     tab.filter = query;
-    rebuild(tab, keep.as_deref(), show_hidden, folders_first);
+    rebuild(tab, keep.as_deref(), display);
     let kept = keep.is_some_and(|name| tab.cursor_entry().is_some_and(|e| e.name == name));
     if !kept {
         // The file under the cursor no longer matches, and the old index now
@@ -1080,6 +1154,9 @@ pub fn is_pane_command(cmd: &Cmd) -> bool {
         cmd,
         CursorUp
             | CursorDown
+            | CursorLeft
+            | CursorRight
+            | ViewAs(_)
             | PageUp { .. }
             | PageDown { .. }
             | CursorHome
@@ -1113,16 +1190,48 @@ pub fn is_pane_command(cmd: &Cmd) -> bool {
 }
 
 pub fn command(model: &mut Model, side: Side, cmd: Cmd, out: &mut Out) {
+    let mode = model.settings.session.view(side);
+    let grid = model.pane(side).grid_columns.max(1);
     let tab = model.pane_mut(side).tab_mut();
     match cmd {
         Cmd::CursorUp => {
-            let to = tab.cursor.saturating_sub(1);
-            move_cursor(tab, to);
+            let step = if mode == ViewMode::Grid { grid } else { 1 };
+            if tab.cursor >= step {
+                let to = tab.cursor - step;
+                move_cursor(tab, to);
+            }
         }
         Cmd::CursorDown => {
-            let to = tab.cursor + 1;
-            move_cursor(tab, to);
+            let step = if mode == ViewMode::Grid { grid } else { 1 };
+            let last = tab.order.len().saturating_sub(1);
+            // Down from a row with a shorter one under it lands on the last
+            // icon, the way Finder does.
+            if tab.cursor + step <= last || tab.cursor / step < last / step {
+                let to = tab.cursor + step;
+                move_cursor(tab, to);
+            }
         }
+        Cmd::CursorLeft => match mode {
+            ViewMode::Grid => {
+                let to = tab.cursor.saturating_sub(1);
+                move_cursor(tab, to);
+            }
+            ViewMode::Columns => go_up(model, side, out),
+            ViewMode::List => {}
+        },
+        Cmd::CursorRight => match mode {
+            ViewMode::Grid => {
+                let to = tab.cursor + 1;
+                move_cursor(tab, to);
+            }
+            ViewMode::Columns => {
+                if let Some(path) = columns::preview_path(tab) {
+                    navigate(model, side, path, None, out);
+                }
+            }
+            ViewMode::List => {}
+        },
+        Cmd::ViewAs(mode) => set_view(model, side, mode, out),
         Cmd::PageUp { rows } => {
             let to = tab.cursor.saturating_sub(rows.max(1));
             move_cursor(tab, to);
@@ -1232,7 +1341,10 @@ pub fn command(model: &mut Model, side: Side, cmd: Cmd, out: &mut Out) {
                 set_filter(model, side, String::new());
             }
         }
-        Cmd::Refresh => reload_active(model, side, out),
+        Cmd::Refresh => {
+            tab.columns.cache.clear();
+            reload_active(model, side, out);
+        }
         Cmd::NewTab => new_tab(model, side, out),
         Cmd::CloseTab => {
             let ix = model.pane(side).active;
@@ -1299,14 +1411,16 @@ pub fn input(model: &mut Model, side: Side, input: PaneInput, out: &mut Out) {
             }
         }
         PaneInput::SortBy(key) => {
-            let (show_hidden, folders_first) = display_flags(model);
+            let display = display(model, side);
             let tab = model.pane_mut(side).tab_mut();
             if tab.sort.key == key {
                 tab.sort.desc = !tab.sort.desc;
             } else {
                 tab.sort = Sort { key, desc: false };
             }
-            rebuild(tab, None, show_hidden, folders_first);
+            let display = display.of(tab);
+            rebuild(tab, None, display);
+            tab.columns.resort(display);
         }
         PaneInput::SelectTab(ix) => select_tab(model, side, ix, out),
         PaneInput::CloseTab(ix) => close_tab(model, side, ix, out),
@@ -1352,6 +1466,24 @@ pub fn input(model: &mut Model, side: Side, input: PaneInput, out: &mut Out) {
                 ops::transfer_drop(model, drag, side, mode, out);
             }
         }
+        PaneInput::ColumnClick { column, row } => columns::click(model, side, column, row, out),
+        PaneInput::GridColumns(n) => model.pane_mut(side).grid_columns = n.max(1),
+        PaneInput::ViewAs(mode) => set_view(model, side, mode, out),
+    }
+}
+
+/// Switches how `side` shows its folders, for every tab of it, and
+/// remembers it.
+fn set_view(model: &mut Model, side: Side, mode: ViewMode, out: &mut Out) {
+    if model.settings.session.view(side) == mode {
+        return;
+    }
+    Arc::make_mut(&mut model.settings).session.set_view(side, mode);
+    model.save_settings(out);
+    let display = display(model, side);
+    for tab in &mut model.pane_mut(side).tabs {
+        tab.columns.reset();
+        rebuild(tab, None, display.of(tab));
     }
 }
 

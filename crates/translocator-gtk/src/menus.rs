@@ -111,6 +111,7 @@ pub fn primary(keys: &KeyMap) -> gio::Menu {
     menus.append_submenu(
         Some("View"),
         &submenu(&[
+            &[("as List", "view-as-list"), ("as Columns", "view-as-columns"), ("as Icons", "view-as-icons")],
             &[("Show Hidden Files", "toggle-hidden"), ("Refresh", "refresh")],
             &[
                 ("Quick Look", "quick-look"),

@@ -552,8 +552,7 @@ impl Shell {
         }
         let side = focus.as_ref().and_then(|focus| {
             SIDES.into_iter().find(|side| {
-                let view = &self.panes[ix(*side)].list.view;
-                focus == view.upcast_ref::<gtk::Widget>() || focus.is_ancestor(view)
+                self.panes[ix(*side)].list.owns(focus)
             })
         });
         if self.focused_pane.replace(side) != side {

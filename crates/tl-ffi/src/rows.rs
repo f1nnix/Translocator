@@ -9,7 +9,10 @@ use tl_app::pane::PARENT;
 use tl_app::settings::DateFormat;
 use tl_app::tl_model::util::human_size;
 use tl_app::tl_model::{Entry, EntryKind};
-use tl_app::view::{LocationKind, PaneView};
+use std::collections::{HashMap, HashSet};
+
+use tl_app::pane::Listing;
+use tl_app::view::{ColumnView, LocationKind, PaneView};
 
 use crate::input::Dragged;
 use crate::types::{path_bytes, usize32};
@@ -68,17 +71,50 @@ pub struct Row {
     pub cursor: bool,
 }
 
-/// The rows `start..start + count` of a pane (fewer at the end).
-pub fn rows(pane: &PaneView, date_format: DateFormat, start: u32, count: u32) -> Vec<Row> {
-    let order = &pane.order;
-    let start = (start as usize).min(order.len());
-    let end = start.saturating_add(count as usize).min(order.len());
-    (start..end).map(|ix| row(pane, ix, date_format)).collect()
+/// What rows are made from: a pane's own list, or another column.
+struct Source<'a> {
+    listing: &'a Listing,
+    order: &'a [u32],
+    cursor: Option<usize>,
+    marked: Option<&'a HashSet<Vec<u8>>>,
+    dir_sizes: Option<&'a HashMap<Vec<u8>, u64>>,
 }
 
-fn row(pane: &PaneView, ix: usize, date_format: DateFormat) -> Row {
+/// The rows `start..start + count` of a pane (fewer at the end).
+pub fn rows(pane: &PaneView, date_format: DateFormat, start: u32, count: u32) -> Vec<Row> {
+    let source = Source {
+        listing: &pane.listing,
+        order: &pane.order,
+        cursor: Some(pane.cursor),
+        marked: Some(&pane.marked),
+        dir_sizes: Some(&pane.dir_sizes),
+    };
+    range(&source, date_format, start, count)
+}
+
+/// The rows of a column other than the pane's own; the folder the path
+/// goes on into has `cursor` set.
+pub fn column_rows(column: &ColumnView, date_format: DateFormat, start: u32, count: u32) -> Vec<Row> {
+    let source = Source {
+        listing: &column.listing,
+        order: &column.order,
+        cursor: column.selected,
+        marked: None,
+        dir_sizes: None,
+    };
+    range(&source, date_format, start, count)
+}
+
+fn range(source: &Source, date_format: DateFormat, start: u32, count: u32) -> Vec<Row> {
+    let len = source.order.len();
+    let start = (start as usize).min(len);
+    let end = start.saturating_add(count as usize).min(len);
+    (start..end).map(|ix| row(source, ix, date_format)).collect()
+}
+
+fn row(pane: &Source, ix: usize, date_format: DateFormat) -> Row {
     let index = usize32(ix);
-    let cursor = ix == pane.cursor;
+    let cursor = pane.cursor == Some(ix);
     let at = pane.order[ix];
     let entry = (at != PARENT).then(|| &pane.listing.entries[at as usize]);
     let Some(entry) = entry else {
@@ -109,7 +145,7 @@ fn row(pane: &PaneView, ix: usize, date_format: DateFormat) -> Row {
             .unwrap_or_default()
     };
     let size = if is_dir {
-        match pane.dir_sizes.get(&entry.name) {
+        match pane.dir_sizes.and_then(|sizes| sizes.get(&entry.name)) {
             Some(size) => human_size(*size),
             None => "DIR".into(),
         }
@@ -132,7 +168,7 @@ fn row(pane: &PaneView, ix: usize, date_format: DateFormat) -> Row {
         is_parent: false,
         hidden: entry.is_hidden(),
         executable: entry.is_executable(),
-        marked: pane.marked.contains(&entry.name),
+        marked: pane.marked.is_some_and(|m| m.contains(&entry.name)),
         cursor,
     }
 }

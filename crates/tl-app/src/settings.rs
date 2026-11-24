@@ -8,6 +8,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::pane::Side;
+
 /// Theme names used when the settings name none (they ship with the UI kit).
 pub const DEFAULT_LIGHT: &str = "Default Light";
 pub const DEFAULT_DARK: &str = "Default Dark";
@@ -226,12 +228,57 @@ impl AppearanceMode {
     }
 }
 
-/// Where the panes were when the application last quit.
+/// Where the panes were when the application last quit, and how each
+/// shows its folder.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Session {
     pub left_path: Option<String>,
     pub right_path: Option<String>,
+    pub left_view: ViewMode,
+    pub right_view: ViewMode,
+}
+
+impl Session {
+    pub fn view(&self, side: Side) -> ViewMode {
+        match side {
+            Side::Left => self.left_view,
+            Side::Right => self.right_view,
+        }
+    }
+
+    pub fn set_view(&mut self, side: Side, mode: ViewMode) {
+        match side {
+            Side::Left => self.left_view = mode,
+            Side::Right => self.right_view = mode,
+        }
+    }
+}
+
+/// How a pane shows its folder.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ViewMode {
+    /// Rows with columns of details.
+    #[default]
+    List,
+    /// The folders above as columns to the left, the folder under the
+    /// cursor as one to the right.
+    Columns,
+    /// Icons in rows, wrapped to the pane's width.
+    Grid,
+}
+
+impl ViewMode {
+    pub const ALL: [ViewMode; 3] = [ViewMode::List, ViewMode::Columns, ViewMode::Grid];
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            ViewMode::List => "as List",
+            ViewMode::Columns => "as Columns",
+            ViewMode::Grid => "as Icons",
+        }
+    }
 }
 
 impl Settings {
@@ -323,6 +370,16 @@ mod tests {
         assert_eq!(settings.general.font_size, 13.);
         assert!(settings.general.show_icons);
         assert_eq!(settings.appearance.light, DEFAULT_LIGHT);
+    }
+
+    #[test]
+    fn each_pane_keeps_its_view() {
+        let settings: Settings = serde_json::from_str(r#"{"session":{"right_view":"columns"}}"#).unwrap();
+        assert_eq!(settings.session.view(Side::Left), ViewMode::List);
+        assert_eq!(settings.session.view(Side::Right), ViewMode::Columns);
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json["session"]["right_view"], "columns");
+        assert_eq!(json["session"]["left_view"], "list");
     }
 
     #[test]

@@ -116,6 +116,20 @@ impl Core {
         rows::rows(pane, view.settings.general.date_format, start, count)
     }
 
+    /// Rows `start..start + count` of a column in the column view: index
+    /// `column` of `PaneSnapshot.columns`, or one past their end for the
+    /// preview column.
+    pub fn column_rows(&self, side: Side, column: u32, start: u32, count: u32) -> Vec<Row> {
+        let view = self.view();
+        let pane = &view.panes[tl_app::Side::from(side).index()];
+        let column = column as usize;
+        let found = pane.columns.get(column).or(if column == pane.columns.len() { pane.preview.as_ref() } else { None });
+        match found {
+            Some(c) => rows::column_rows(c, view.settings.general.date_format, start, count),
+            None => Vec::new(),
+        }
+    }
+
     /// What dragging `row` carries: the marked rows if it is marked, else
     /// that row. `None` for "..".
     pub fn drag(&self, side: Side, row: u32) -> Option<DragItems> {

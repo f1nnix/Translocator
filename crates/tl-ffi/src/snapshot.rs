@@ -18,9 +18,9 @@ use tl_app::settings::DateFormat as CoreDateFormat;
 use tl_app::tl_model::transfer::{Conflict, ConflictChoice as CoreChoice};
 use tl_app::tl_model::util::human_size;
 use tl_app::tl_model::Entry;
-use tl_app::view::{JobView, LocationKind as CoreKind, PaneView, ViewModel};
+use tl_app::view::{ColumnView, JobView, LocationKind as CoreKind, PaneView, ViewModel};
 
-use crate::types::{Caps, ConflictChoice, LocationKind, Side, SortKey, Utf16Range, path_bytes, usize32};
+use crate::types::{Caps, ConflictChoice, LocationKind, Side, SortKey, Utf16Range, ViewMode, path_bytes, usize32};
 use crate::versions::{Tracker, addr};
 use crate::{bookmarks, editor, properties, quick_look, rename, settings, sync};
 
@@ -171,6 +171,29 @@ pub struct PaneSnapshot {
     pub places: Vec<PlaceItem>,
     /// This folder is on the row of places.
     pub place_saved: bool,
+    pub view_mode: ViewMode,
+    /// In the column view: the folders left of the pane's own, leftmost
+    /// first. Their rows come from `Core::column_rows`.
+    pub columns: Vec<ColumnSnapshot>,
+    /// In the column view: the folder under the cursor, right of the
+    /// pane's own; `Core::column_rows` knows it as one past `columns`.
+    pub preview: Option<ColumnSnapshot>,
+}
+
+/// A column other than the pane's own, in the column view.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ColumnSnapshot {
+    /// The folder, raw.
+    pub path: Vec<u8>,
+    /// Its name, for the column's accessibility label.
+    pub name: String,
+    pub row_count: u32,
+    /// The folder the path goes on into, drawn selected.
+    pub selected: Option<u32>,
+    /// Moves exactly when the rows changed: fetch them again.
+    pub version: u64,
+    pub loading: bool,
+    pub error: Option<String>,
 }
 
 #[derive(uniffi::Record, Clone, Debug, PartialEq, Eq, Hash)]
@@ -389,8 +412,8 @@ pub(crate) fn build(view: &ViewModel, t: &mut Trackers) -> Snapshot {
     t.sync.retain(&view.dialogs);
 
     let [left, right] = &view.panes;
-    let left = pane(left, Side::Left, t.listing[0].version(listing_key(left, date_format)));
-    let right = pane(right, Side::Right, t.listing[1].version(listing_key(right, date_format)));
+    let left = pane(left, Side::Left, t.listing[0].version(listing_key(left, date_format)), date_format);
+    let right = pane(right, Side::Right, t.listing[1].version(listing_key(right, date_format)), date_format);
     let settings_version = t.settings.version(addr(&view.settings));
     let keys_version = t.keys.version(view.settings.keys.clone());
 
@@ -470,7 +493,7 @@ fn listing_key(p: &PaneView, date_format: CoreDateFormat) -> ListingKey {
     )
 }
 
-fn pane(p: &PaneView, side: Side, listing_version: u64) -> PaneSnapshot {
+fn pane(p: &PaneView, side: Side, listing_version: u64, date_format: CoreDateFormat) -> PaneSnapshot {
     let has_parent = p.order.first() == Some(&PARENT);
     let shown = p.order.len() - usize::from(has_parent);
     let cursor_entry = match p.order.get(p.cursor) {
@@ -533,6 +556,22 @@ fn pane(p: &PaneView, side: Side, listing_version: u64) -> PaneSnapshot {
             })
             .collect(),
         place_saved: p.place_saved,
+        view_mode: p.view_mode.into(),
+        columns: p.columns.iter().map(|c| column(c, date_format)).collect(),
+        preview: p.preview.as_ref().map(|c| column(c, date_format)),
+    }
+}
+
+fn column(c: &ColumnView, date_format: CoreDateFormat) -> ColumnSnapshot {
+    ColumnSnapshot {
+        path: path_bytes(&c.path),
+        name: if c.path.is_root() { "/".into() } else { c.path.file_name_lossy() },
+        row_count: usize32(c.order.len()),
+        selected: c.selected.map(usize32),
+        // Revisions are unique for good; the date format changes the text.
+        version: c.revision * 4 + date_format as u64,
+        loading: c.loading,
+        error: c.error.clone(),
     }
 }
 

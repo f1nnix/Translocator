@@ -15,8 +15,8 @@ use crate::ids::{ConnId, JobId, TabId};
 use crate::jobs::{Job, JobStatus};
 use crate::model::{Console, FocusTarget, Model};
 use crate::pane::{Listing, Side, Sort, Tab, Totals};
-use crate::settings::Settings;
-use crate::{editor, quick_look};
+use crate::settings::{Settings, ViewMode};
+use crate::{columns, editor, quick_look};
 
 #[derive(Clone, Debug, Default)]
 pub struct ViewModel {
@@ -115,6 +115,25 @@ pub struct PaneView {
     pub places: Vec<PlaceView>,
     /// This folder is on the row.
     pub place_saved: bool,
+    pub view_mode: ViewMode,
+    /// In the column view: the folders left of this one, leftmost first.
+    pub columns: Vec<ColumnView>,
+    /// In the column view: the folder under the cursor, to the right.
+    pub preview: Option<ColumnView>,
+}
+
+/// A column other than the pane's own, in the column view.
+#[derive(Clone, Debug, Default)]
+pub struct ColumnView {
+    pub path: VPath,
+    pub listing: Listing,
+    pub order: Arc<Vec<u32>>,
+    /// The row of the folder the path goes on into.
+    pub selected: Option<usize>,
+    pub loading: bool,
+    pub error: Option<String>,
+    /// New whenever the rows change.
+    pub revision: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -225,6 +244,12 @@ fn pane_view(model: &Model, side: Side) -> PaneView {
         })
         .collect();
     let place_saved = places.iter().any(|p| p.current);
+    let view_mode = model.settings.session.view(side);
+    let (columns, preview) = if view_mode == ViewMode::Columns {
+        column_views(tab)
+    } else {
+        (Vec::new(), None)
+    };
     let disconnected = !conns.is_connected(host) || (conn != host && !conns.is_connected(conn));
     let can_reconnect = conns.get(host).and_then(|c| c.bookmark.as_ref()).is_some();
     PaneView {
@@ -260,7 +285,37 @@ fn pane_view(model: &Model, side: Side) -> PaneView {
         free: tab.space.map(|s| format!("{} free", human_size(s.available))),
         places,
         place_saved,
+        view_mode,
+        columns,
+        preview,
     }
+}
+
+fn column_views(tab: &Tab) -> (Vec<ColumnView>, Option<ColumnView>) {
+    let Some(root) = &tab.columns.root else { return (Vec::new(), None) };
+    let view = |path: VPath| {
+        let column = tab.columns.cache.get(&path);
+        match column {
+            Some(c) => ColumnView {
+                path,
+                listing: c.listing.clone(),
+                order: c.order.clone(),
+                selected: c.selected,
+                loading: c.loading,
+                error: c.error.clone(),
+                revision: c.revision,
+            },
+            // Waiting for the cursor to settle.
+            None => ColumnView {
+                path,
+                loading: true,
+                ..ColumnView::default()
+            },
+        }
+    };
+    let columns = columns::ancestors(root, &tab.loc.path).into_iter().map(view).collect();
+    let preview = columns::preview_path(tab).map(|p| ColumnView { selected: None, ..view(p) });
+    (columns, preview)
 }
 
 /// The last path component; on a server, with its label in front.

@@ -11,6 +11,7 @@ use std::collections::BTreeMap;
 
 use crate::model::Command;
 use crate::pane::Side;
+use crate::settings::ViewMode;
 
 /// Where a command fires.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -82,6 +83,8 @@ const fn spec(
 pub static COMMANDS: &[CommandSpec] = &[
     spec("cursor-up", "Move up", "Cursor and marks", Context::Pane, &["up"], KeyTarget::Command(Command::CursorUp)),
     spec("cursor-down", "Move down", "Cursor and marks", Context::Pane, &["down"], KeyTarget::Command(Command::CursorDown)),
+    spec("cursor-left", "Move left (icons) or out of the folder (columns)", "Cursor and marks", Context::Pane, &["left"], KeyTarget::Command(Command::CursorLeft)),
+    spec("cursor-right", "Move right (icons) or into the folder (columns)", "Cursor and marks", Context::Pane, &["right"], KeyTarget::Command(Command::CursorRight)),
     spec("page-up", "Page up", "Cursor and marks", Context::Pane, &["pageup"], KeyTarget::Command(Command::PageUp { rows: 0 })),
     spec("page-down", "Page down", "Cursor and marks", Context::Pane, &["pagedown"], KeyTarget::Command(Command::PageDown { rows: 0 })),
     spec("cursor-home", "To the first row", "Cursor and marks", Context::Pane, &["home", "alt-up"], KeyTarget::Command(Command::CursorHome)),
@@ -113,6 +116,9 @@ pub static COMMANDS: &[CommandSpec] = &[
     spec("switch-pane", "Other pane", "Panes and tabs", Context::Pane, &["tab"], KeyTarget::Command(Command::SwitchPane)),
     spec("swap-panes", "Swap the panes", "Panes and tabs", Context::Workspace, &["cmd-u"], KeyTarget::Command(Command::SwapPanes)),
     spec("mirror-pane", "Same folder in the other pane", "Panes and tabs", Context::Pane, &["cmd-="], KeyTarget::Command(Command::MirrorPane)),
+    spec("view-as-list", "View as list", "Panes and tabs", Context::Pane, &["cmd-alt-1"], KeyTarget::Command(Command::ViewAs(ViewMode::List))),
+    spec("view-as-columns", "View as columns", "Panes and tabs", Context::Pane, &["cmd-alt-2"], KeyTarget::Command(Command::ViewAs(ViewMode::Columns))),
+    spec("view-as-icons", "View as icons", "Panes and tabs", Context::Pane, &["cmd-alt-3"], KeyTarget::Command(Command::ViewAs(ViewMode::Grid))),
     spec("quick-look", "Quick look at the file under the cursor", "Panes and tabs", Context::Workspace, &["cmd-y"], KeyTarget::Command(Command::ToggleQuickLook)),
     spec("toggle-place", "Save or forget this folder", "Saved folders", Context::Pane, &["cmd-d"], KeyTarget::Command(Command::TogglePlace)),
     spec("go-to-place-1", "First saved folder", "Saved folders", Context::Pane, &["cmd-1"], KeyTarget::Command(Command::GoToPlace(0))),

@@ -15,8 +15,8 @@ use crate::ids::{ConnId, DialogId, EditorId, Ids, JobId, TabId};
 use crate::jobs::Jobs;
 use crate::pane::{Pane, Side};
 use crate::quick_look::QuickLook;
-use crate::settings::{AppearanceMode, DateFormat, Settings, SortKey};
-use crate::{Event, Out, bookmarks, dialog, editor, jobs, ops, pane, properties, quick_look, rename, sync};
+use crate::settings::{AppearanceMode, DateFormat, Settings, SortKey, ViewMode};
+use crate::{Event, Out, bookmarks, columns, dialog, editor, jobs, ops, pane, properties, quick_look, rename, sync};
 
 /// Files put on the internal clipboard with ⌘C / ⌘X.
 #[derive(Clone, Debug, PartialEq)]
@@ -145,6 +145,12 @@ pub enum Command {
     // cursor and marks
     CursorUp,
     CursorDown,
+    /// In the grid, the icon to the side; in the column view, out to the
+    /// folder above and into the one under the cursor. Nothing in the list.
+    CursorLeft,
+    CursorRight,
+    /// How the active pane shows its folder.
+    ViewAs(ViewMode),
     /// Moves by `rows` (what fits in the list, as the shell measured it).
     PageUp { rows: usize },
     PageDown { rows: usize },
@@ -271,6 +277,7 @@ pub enum Reply {
     Job { id: JobId, update: JobUpdate },
     Watch { tab: TabId, out: WatchOutput },
     Pane(pane::PaneReply),
+    Columns(columns::ColumnsReply),
     Ops(ops::OpsReply),
     Editor(EditorId, editor::EditorReply),
     QuickLook(quick_look::QuickLookReply),
@@ -330,6 +337,7 @@ fn reply(model: &mut Model, reply: Reply, out: &mut Out) {
         Reply::Job { id, update } => jobs::update(model, id, update, out),
         Reply::Watch { tab, out: change } => pane::watched(model, tab, change, out),
         Reply::Pane(reply) => pane::reply(model, reply, out),
+        Reply::Columns(reply) => columns::reply(model, reply, out),
         Reply::Ops(reply) => ops::reply(model, reply, out),
         Reply::Editor(id, reply) => editor::reply(model, id, reply, out),
         Reply::QuickLook(reply) => quick_look::reply(model, reply, out),

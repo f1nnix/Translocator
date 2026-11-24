@@ -18,13 +18,18 @@ use gtk::{gio, glib};
 use tl_ffi::input::Command;
 use tl_ffi::keys::{KeyContext, KeyTarget};
 use tl_ffi::snapshot::Snapshot;
+use tl_ffi::types::ViewMode;
 
 use crate::keys::KeyMap;
 use crate::shell;
 
 /// Commands shown as check items, and how a snapshot says they are on.
 fn toggle_state(id: &str, snapshot: &Snapshot) -> Option<bool> {
+    let view = snapshot.pane(snapshot.active).view_mode;
     Some(match id {
+        "view-as-list" => view == ViewMode::List,
+        "view-as-columns" => view == ViewMode::Columns,
+        "view-as-icons" => view == ViewMode::Grid,
         "toggle-hidden" => snapshot.settings.general.show_hidden,
         "quick-look" => snapshot.quick_look.is_some(),
         "toggle-jobs" => snapshot.jobs_open,

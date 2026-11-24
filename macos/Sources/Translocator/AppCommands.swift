@@ -56,6 +56,11 @@ struct AppCommands: Commands {
             }
 
             CommandGroup(before: .toolbar) {
+                let mode = store.pane(store.snapshot.active).viewMode
+                ForEach(ViewMode.all, id: \.self) { view in
+                    toggle(view.title, .viewAs(mode: view), on: mode == view)
+                }
+                Divider()
                 toggle("Show Hidden Files", .toggleHidden, on: store.snapshot.settings.general.showHidden)
                 item("Refresh", .refresh)
                 Divider()

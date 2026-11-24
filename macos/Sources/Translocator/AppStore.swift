@@ -184,11 +184,13 @@ final class AppStore {
 
     // ----- the file lists ---------------------------------------------------
 
-    func register(_ table: FileTableView, for side: Side) {
-        tables[side] = WeakTable(table: table)
+    /// The view of `side` that takes the keyboard. The latest one made
+    /// wins: switching a pane's view makes a new one.
+    func register(_ view: any PaneFocusable, for side: Side) {
+        tables[side] = WeakTable(table: view)
     }
 
-    func table(_ side: Side) -> FileTableView? {
+    func table(_ side: Side) -> (any PaneFocusable)? {
         tables[side]?.table
     }
 
@@ -233,5 +235,5 @@ final class AppStore {
 }
 
 private struct WeakTable {
-    weak var table: FileTableView?
+    weak var table: (any PaneFocusable)?
 }
